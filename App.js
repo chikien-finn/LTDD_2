@@ -7,6 +7,8 @@ import Onboarding3Screen from './src/screens/Onboarding3Screen';
 import Onboarding4Screen from './src/screens/Onboarding4Screen';
 import SignInScreen from './src/screens/SignInScreen';
 import SignUpScreen from './src/screens/SignUpScreen';
+import ResetPasswordScreen from './src/screens/ResetPasswordScreen';
+import VerificationScreen from './src/screens/VerificationScreen';
 
 // Giữ native splash screen cho đến khi app sẵn sàng
 ExpoSplashScreen.preventAutoHideAsync();
@@ -16,6 +18,8 @@ export default function App() {
 
   const goToSignIn = () => setCurrentScreen('signin');
   const goToSignUp = () => setCurrentScreen('signup');
+  const goToResetPassword = () => setCurrentScreen('resetPassword');
+  const goToVerification = () => setCurrentScreen('verification');
 
   const onLayoutRootView = useCallback(async () => {
     await ExpoSplashScreen.hideAsync();
@@ -45,10 +49,25 @@ export default function App() {
         />
       )}
       {currentScreen === 'signin' && (
-        <SignInScreen onSignUp={goToSignUp} />
+        <SignInScreen
+          onSignUp={goToSignUp}
+          onForgotPassword={goToResetPassword}
+        />
       )}
       {currentScreen === 'signup' && (
         <SignUpScreen onBack={goToSignIn} />
+      )}
+      {currentScreen === 'resetPassword' && (
+        <ResetPasswordScreen
+          onBack={goToSignIn}
+          onSend={goToVerification}
+        />
+      )}
+      {currentScreen === 'verification' && (
+        <VerificationScreen
+          onBack={goToResetPassword}
+          onContinue={goToSignIn}
+        />
       )}
     </View>
   );
