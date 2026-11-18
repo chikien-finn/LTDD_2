@@ -1,16 +1,24 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   StyleSheet,
   Text,
   View,
   ScrollView,
-  TouchableOpacity,
   TextInput,
-  SafeAreaView,
   Alert,
   Modal,
+  Platform,
+  KeyboardAvoidingView,
+  Animated,
+  Easing,
+  LayoutAnimation,
+  Pressable,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
+import { LinearGradient } from 'expo-linear-gradient';
+import { Ionicons } from '@expo/vector-icons';
+import * as Haptics from 'expo-haptics';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { isFirebaseConfigured } from './src/firebase/config';
 import { mqttService } from './src/mqtt/mqttService';
 import {
@@ -30,10 +38,78 @@ import {
   addProduct,
   deleteProduct,
 } from './src/firebase/databaseService';
+import { COLORS, RADIUS, MONO, shadow } from './src/ui/theme';
+import {
+  ScalePress,
+  PulseDot,
+  ProgressBar,
+  EmptyState,
+  Toast,
+  ToastData,
+  ToastType,
+  IconName,
+} from './src/ui/components';
 
 type TabType = 'unpaid' | 'paid' | 'security';
 
+const ICONS = ['👕', '👖', '🧥', '👗', '👟', '🧢', '🎒', '🕶️'];
+const MAX_LOGS_SHOWN = 50;
+const NAV_HEIGHT = 64;
+
+/* ---------------------------- Tiện ích ---------------------------- */
+const formatCurrency = (val: number) => (val || 0).toLocaleString('vi-VN') + ' đ';
+
+const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+
+const haptic = {
+  light: () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+  },
+  success: () => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+  },
+  warning: () => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
+  },
+  error: () => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {});
+  },
+};
+
+const animateLayout = () =>
+  LayoutAnimation.configureNext(LayoutAnimation.create(240, 'easeInEaseOut', 'opacity'));
+
+const getGreeting = () => {
+  const h = new Date().getHours();
+  if (h < 11) return 'Chào buổi sáng';
+  if (h < 14) return 'Chào buổi trưa';
+  if (h < 18) return 'Chào buổi chiều';
+  return 'Chào buổi tối';
+};
+
+const getDateLabel = () => {
+  const d = new Date();
+  const days = ['Chủ nhật', 'Thứ hai', 'Thứ ba', 'Thứ tư', 'Thứ năm', 'Thứ sáu', 'Thứ bảy'];
+  const dd = d.getDate().toString().padStart(2, '0');
+  const mm = (d.getMonth() + 1).toString().padStart(2, '0');
+  return `${days[d.getDay()]}, ${dd}/${mm}/${d.getFullYear()}`;
+};
+
+const formatLogTime = (time: string) =>
+  time && time.includes('s') && !time.includes(':') ? `${time} trước` : time;
+
+/* =================================================================== */
 export default function App() {
+  return (
+    <SafeAreaProvider>
+      <SmartStoreScreen />
+    </SafeAreaProvider>
+  );
+}
+
+function SmartStoreScreen() {
+  const insets = useSafeAreaInsets();
+
   const [isConfigured] = useState<boolean>(isFirebaseConfigured());
   const [products, setProducts] = useState<Product[]>(Object.values(DEFAULT_PRODUCTS));
   const [gate, setGate] = useState<GateStatus>({
@@ -51,8 +127,8 @@ export default function App() {
   const [logs, setLogs] = useState<ScanLog[]>([]);
   const [isMqttConnected, setIsMqttConnected] = useState<boolean>(false);
 
-  // 3 Tab chính: Chưa thanh toán | Đã thanh toán | Cổng an ninh
   const [activeTab, setActiveTab] = useState<TabType>('unpaid');
+  const [query, setQuery] = useState<string>('');
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [tempUid, setTempUid] = useState<string>('');
@@ -66,7 +142,32 @@ export default function App() {
   const [newTagLabel, setNewTagLabel] = useState<string>('Móc khóa #3');
   const [newIcon, setNewIcon] = useState<string>('👕');
 
-  const ICONS = ['👕', '👖', '🧥', '👗', '👟', '🧢', '🎒', '🕶️'];
+  // Toast
+  const [toast, setToast] = useState<ToastData | null>(null);
+  const showToast = useCallback((type: ToastType, title: string, message?: string) => {
+    setToast({ id: Date.now(), type, title, message });
+  }, []);
+
+  // Hiệu ứng xoay nút đồng bộ
+  const spin = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (!isSyncing) {
+      spin.stopAnimation();
+      spin.setValue(0);
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.timing(spin, {
+        toValue: 1,
+        duration: 900,
+        easing: Easing.linear,
+        useNativeDriver: true,
+      })
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [isSyncing, spin]);
+  const spinDeg = spin.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
 
   // Đăng ký lắng nghe Firebase Realtime Database & MQTT Broker
   useEffect(() => {
@@ -115,16 +216,22 @@ export default function App() {
           lastMessage: `${data.product}: ${data.note || data.status}`,
         }));
 
-        // Bổ sung tức thì vào danh sách logs trên App với thời gian chính xác
         const newLogEntry: ScanLog = {
           id: 'log_' + Date.now(),
           time: timeFormatted,
           productName: data.product,
           tagUid: data.uid,
           status: data.status === 'PAID' ? 'PASS' : 'ALERT',
-          message: data.note || (data.status === 'PAID' ? 'Đã thanh toán - Cho phép qua' : 'CẢNH BÁO: Chưa thanh toán!'),
+          message:
+            data.note ||
+            (data.status === 'PAID'
+              ? 'Đã thanh toán - Cho phép qua'
+              : 'CẢNH BÁO: Chưa thanh toán!'),
         };
-        setLogs((prev) => [newLogEntry, ...prev.filter((l) => l.tagUid !== data.uid || l.time !== timeFormatted)]);
+        setLogs((prev) => [
+          newLogEntry,
+          ...prev.filter((l) => l.tagUid !== data.uid || l.time !== timeFormatted),
+        ]);
       },
       onGate: (status) => {
         setGate((prev) => ({
@@ -149,104 +256,131 @@ export default function App() {
     };
   }, []);
 
-  // Lọc sản phẩm theo trạng thái
+  /* ------------------------- Dữ liệu dẫn xuất ------------------------- */
   const unpaidProducts = products.filter((p) => !p.isPaid);
   const paidProducts = products.filter((p) => p.isPaid);
+  const unpaidTotal = unpaidProducts.reduce((sum, item) => sum + (item.price || 0), 0);
+  const paidTotal = paidProducts.reduce((sum, item) => sum + (item.price || 0), 0);
+  const alertCount = logs.filter((l) => l.status === 'ALERT').length;
 
-  // Ép đồng bộ thủ công từ Cloud
+  const q = query.trim().toLowerCase();
+  const matches = (p: Product) =>
+    !q ||
+    p.name.toLowerCase().includes(q) ||
+    p.tagUid.toLowerCase().includes(q) ||
+    (p.category || '').toLowerCase().includes(q);
+  const visibleUnpaid = unpaidProducts.filter(matches);
+  const visiblePaid = paidProducts.filter(matches);
+
+  const isGateOnline = gate.status === 'ONLINE';
+  const hasUnknownChip =
+    Boolean(gate.lastScannedUid) &&
+    !products.some((p) => p.tagUid.toUpperCase() === gate.lastScannedUid.toUpperCase());
+
+  const temp = environment.temperature;
+  const hum = environment.humidity;
+  const tempStatus = temp > 32 ? 'Hơi nóng' : temp < 18 ? 'Hơi lạnh' : 'Lý tưởng';
+  const humStatus = hum > 75 ? 'Độ ẩm cao' : hum < 35 ? 'Hơi khô' : 'Ổn định';
+
+  /* ----------------------------- Hành động ----------------------------- */
+  const changeTab = (tab: TabType) => {
+    if (tab === activeTab) return;
+    haptic.light();
+    animateLayout();
+    setActiveTab(tab);
+    setEditingId(null);
+  };
+
   const handleManualSync = async () => {
+    haptic.light();
     setIsSyncing(true);
     const freshData = await fetchProductsDirect();
     setIsSyncing(false);
     if (freshData && freshData.length > 0) {
+      animateLayout();
       setProducts(freshData);
-      Alert.alert('Đã đồng bộ', 'Dữ liệu mới nhất đã được tải về từ Firebase!');
+      haptic.success();
+      showToast('success', 'Đã đồng bộ dữ liệu', 'Dữ liệu mới nhất đã được tải từ Firebase.');
+    } else {
+      haptic.error();
+      showToast('error', 'Không thể đồng bộ', 'Vui lòng kiểm tra lại kết nối mạng.');
     }
   };
 
-  // 1. THANH TOÁN SẢN PHẨM (Bay từ Chưa trả -> Đã thanh toán)
+  // 1. THANH TOÁN SẢN PHẨM
   const handlePayProduct = async (item: Product) => {
-    setProducts((prev) =>
-      prev.map((p) => (p.id === item.id ? { ...p, isPaid: true } : p))
-    );
+    animateLayout();
+    setProducts((prev) => prev.map((p) => (p.id === item.id ? { ...p, isPaid: true } : p)));
+    haptic.success();
+    showToast('success', 'Thanh toán thành công', `"${item.name}" đã có thể qua cổng an ninh.`);
     await updateProductPayment(item.id, true);
-    Alert.alert(
-      '✅ THANH TOÁN THÀNH CÔNG!',
-      `Món đồ "${item.name}" đã thanh toán thành công!\n\nĐã chuyển sang mục "ĐÃ THANH TOÁN". Bạn có thể mang qua cổng an ninh hợp lệ.`
-    );
   };
 
-  // 2. TRẢ HÀNG / ĐẶT LẠI CHƯA TRẢ (Bay từ Đã thanh toán -> Chưa trả để test trộm)
+  // 2. ĐẶT LẠI CHƯA TRẢ
   const handleRefundProduct = async (item: Product) => {
-    setProducts((prev) =>
-      prev.map((p) => (p.id === item.id ? { ...p, isPaid: false } : p))
-    );
+    animateLayout();
+    setProducts((prev) => prev.map((p) => (p.id === item.id ? { ...p, isPaid: false } : p)));
+    haptic.warning();
+    showToast('info', 'Đã đặt lại chưa thanh toán', `Mang "${item.name}" qua cổng sẽ kích hoạt còi.`);
     await updateProductPayment(item.id, false);
-    Alert.alert(
-      '↩️ ĐÃ ĐẶT LẠI CHƯA TRẢ!',
-      `Món đồ "${item.name}" đã chuyển về mục "CHƯA THANH TOÁN".\n\nNếu bây giờ mang qua cổng an ninh, còi Buzzer sẽ hú báo động!`
-    );
   };
 
-  // 3. THÊM SẢN PHẨM MỚI (Khi mua thêm móc khóa RFID mới)
+  // 3. THÊM SẢN PHẨM MỚI
   const handleCreateProduct = async () => {
     if (!newName.trim()) {
+      haptic.error();
       Alert.alert('Thiếu thông tin', 'Vui lòng nhập tên món đồ!');
       return;
     }
     if (!newUid.trim()) {
+      haptic.error();
       Alert.alert('Thiếu mã RFID', 'Vui lòng nhập mã UID của chip/móc khóa!');
       return;
     }
 
     const cleanUid = newUid.trim().toUpperCase().replace(/\s+/g, '');
-    const newId = Date.now().toString();
-
     const newProd: Product = {
-      id: newId,
+      id: Date.now().toString(),
       name: newName.trim(),
       category: 'Thời trang thông minh',
-      price: parseInt(newPrice) || 200000,
+      price: parseInt(newPrice, 10) || 200000,
       tagUid: cleanUid,
       tagLabel: newTagLabel.trim() || `Móc khóa #${products.length + 1}`,
-      isPaid: false, // Mới thêm thì mặc định chưa thanh toán
+      isPaid: false,
       icon: newIcon,
     };
 
+    animateLayout();
     setProducts((prev) => [...prev, newProd]);
     setShowAddModal(false);
+    setActiveTab('unpaid');
 
-    // Reset form
     setNewName('');
     setNewPrice('250000');
     setNewUid('');
     setNewTagLabel(`Móc khóa #${products.length + 2}`);
 
+    haptic.success();
+    showToast('success', 'Đã thêm món đồ mới', `${newProd.name} • UID ${newProd.tagUid}`);
     await addProduct(newProd);
-
-    Alert.alert(
-      '🎉 ĐÃ THÊM MÓN ĐỒ MỚI!',
-      `Tên: ${newProd.name}\nRFID UID: ${newProd.tagUid}\n\nMón này đã xuất hiện trong danh sách "CHƯA TRẢ" và sẵn sàng test với ESP32!`
-    );
   };
 
   // 4. XÓA SẢN PHẨM
   const handleDeleteProduct = (item: Product) => {
-    Alert.alert(
-      'Xác nhận xóa',
-      `Bạn có chắc muốn xóa "${item.name}" (UID: ${item.tagUid}) khỏi hệ thống?`,
-      [
-        { text: 'Hủy', style: 'cancel' },
-        {
-          text: 'Xóa ngay',
-          style: 'destructive',
-          onPress: async () => {
-            setProducts((prev) => prev.filter((p) => p.id !== item.id));
-            await deleteProduct(item.id);
-          },
+    haptic.warning();
+    Alert.alert('Xóa sản phẩm?', `"${item.name}" (UID: ${item.tagUid}) sẽ bị xóa khỏi hệ thống.`, [
+      { text: 'Hủy', style: 'cancel' },
+      {
+        text: 'Xóa',
+        style: 'destructive',
+        onPress: async () => {
+          animateLayout();
+          setProducts((prev) => prev.filter((p) => p.id !== item.id));
+          showToast('info', 'Đã xóa sản phẩm', item.name);
+          await deleteProduct(item.id);
         },
-      ]
-    );
+      },
+    ]);
   };
 
   // Lưu mã UID sửa trực tiếp
@@ -256,20 +390,17 @@ export default function App() {
       return;
     }
     const cleanUid = tempUid.trim().toUpperCase().replace(/\s+/g, '');
-
-    setProducts((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, tagUid: cleanUid } : p))
-    );
-
-    await updateProductUid(id, cleanUid);
+    setProducts((prev) => prev.map((p) => (p.id === id ? { ...p, tagUid: cleanUid } : p)));
     setEditingId(null);
     setTempUid('');
+    haptic.success();
+    showToast('success', 'Đã cập nhật mã UID', cleanUid);
+    await updateProductUid(id, cleanUid);
   };
 
   // Giả lập quét cổng an ninh
   const simulateGateScan = async (product: Product) => {
-    const now = new Date();
-    const timeStr = now.toTimeString().split(' ')[0];
+    const timeStr = new Date().toTimeString().split(' ')[0];
     const isSuccess = product.isPaid;
 
     const logEntry = {
@@ -283,1190 +414,1902 @@ export default function App() {
     };
 
     setLogs((prev) => [{ id: Date.now().toString(), ...logEntry }, ...prev]);
+
+    if (isSuccess) {
+      haptic.success();
+      showToast('success', 'Cổng an toàn', `${product.name} • OLED hiển thị "Cảm ơn"`);
+    } else {
+      haptic.error();
+      showToast('error', 'Cảnh báo báo động!', `${product.name} chưa thanh toán • Còi Buzzer hú`);
+    }
     await pushSecurityLog(logEntry);
-
-    Alert.alert(
-      isSuccess ? '✅ CỔNG AN TOÀN' : '🚨 CẢNH BÁO BÁO ĐỘNG!',
-      `Sản phẩm: ${product.name}\nRFID: ${product.tagUid}\nTrạng thái: ${
-        isSuccess ? 'Hợp lệ (OLED hiện Cảm ơn)' : 'Chưa thanh toán (Còi Buzzer hú)'
-      }`
-    );
   };
 
-  const formatCurrency = (val: number) => {
-    return val.toLocaleString('vi-VN') + ' đ';
+  const sendGate = (cmd: 'OPEN' | 'CLOSE') => {
+    const sent = mqttService.sendGateCommand(cmd);
+    if (sent) {
+      haptic.success();
+      showToast(
+        'success',
+        cmd === 'OPEN' ? 'Đã gửi lệnh mở cổng' : 'Đã gửi lệnh đóng cổng',
+        'Lệnh đã được gửi qua MQTT tới ESP32.'
+      );
+    } else {
+      haptic.error();
+      showToast('error', 'Chưa kết nối MQTT', 'App chưa kết nối được tới MQTT broker.');
+    }
   };
+
+  const openAddModal = (prefillUid?: string) => {
+    haptic.light();
+    if (prefillUid) {
+      setNewUid(prefillUid);
+    } else if (hasUnknownChip) {
+      setNewUid(gate.lastScannedUid);
+    }
+    setNewTagLabel(`Móc khóa #${products.length + 1}`);
+    setShowAddModal(true);
+  };
+
+  /* ------------------------------ Render ------------------------------ */
+  const TABS: { key: TabType; label: string; icon: IconName; iconActive: IconName; count: number }[] = [
+    { key: 'unpaid', label: 'Chưa trả', icon: 'cart-outline', iconActive: 'cart', count: unpaidProducts.length },
+    { key: 'paid', label: 'Đã trả', icon: 'bag-check-outline', iconActive: 'bag-check', count: paidProducts.length },
+    { key: 'security', label: 'An ninh', icon: 'shield-outline', iconActive: 'shield-checkmark', count: alertCount },
+  ];
+
+  const navBottom = Math.max(insets.bottom, 14) + 2;
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <View style={[styles.root, { paddingTop: insets.top }]}>
       <StatusBar style="dark" />
 
-      {/* Header */}
-      <View style={styles.header}>
-        <View>
-          <Text style={styles.headerTitle}>🏪 SMART STORE</Text>
-          <Text style={styles.headerSubtitle}>Cửa Hàng & Cổng An Ninh Thông Minh IoT</Text>
-        </View>
-        <TouchableOpacity
-          style={styles.syncButton}
-          onPress={handleManualSync}
-          disabled={isSyncing}
-        >
-          <Text style={styles.syncButtonText}>{isSyncing ? '...' : '🔄 Đồng bộ'}</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Thẻ giám sát Môi trường & Cổng (DHT22 + ESP32) */}
-      <View style={styles.dashboardCard}>
-        <View style={styles.dashboardItem}>
-          <Text style={styles.dashboardLabel}>Cổng ESP32</Text>
-          <Text
-            style={
-              gate.status === 'ONLINE'
-                ? styles.dashboardValueOnline
-                : styles.dashboardValueOffline
-            }
-          >
-            ● {gate.status === 'ONLINE' ? 'Trực tuyến' : 'Ngoại tuyến'}
-          </Text>
-        </View>
-        <View style={styles.dividerVertical} />
-        <View style={styles.dashboardItem}>
-          <Text style={styles.dashboardLabel}>Nhiệt độ kho</Text>
-          <Text style={styles.dashboardValue}>{environment.temperature.toFixed(1)}°C</Text>
-        </View>
-        <View style={styles.dividerVertical} />
-        <View style={styles.dashboardItem}>
-          <Text style={styles.dashboardLabel}>Độ ẩm</Text>
-          <Text style={styles.dashboardValue}>{environment.humidity.toFixed(0)}%</Text>
-        </View>
-      </View>
-
-      {/* BANNER THÔNG MINH: TỰ ĐỘNG PHÁT HIỆN KHI CÓ CHIP MỚI QUẸT QUA CỔNG */}
-      {Boolean(gate.lastScannedUid) &&
-        !products.some(
-          (p) => p.tagUid.toUpperCase() === gate.lastScannedUid.toUpperCase()
-        ) && (
-          <View style={styles.autoDetectBanner}>
-            <View style={{ flex: 1, marginRight: 8 }}>
-              <Text style={styles.autoDetectTitle}>✨ Phát hiện chip mới vừa quẹt!</Text>
-              <Text style={styles.autoDetectUid}>Mã UID: {gate.lastScannedUid}</Text>
+      <ScrollView
+        contentContainerStyle={[styles.scrollContent, { paddingBottom: NAV_HEIGHT + navBottom + 28 }]}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+      >
+        {/* ---------------- Top bar ---------------- */}
+        <View style={styles.topBar}>
+          <View style={styles.topBarText}>
+            <Text style={styles.greeting}>{getGreeting()} 👋</Text>
+            <Text style={styles.brand}>Smart Store</Text>
+            <View style={styles.dateRow}>
+              <Ionicons name="calendar-clear-outline" size={12} color={COLORS.inkMuted} />
+              <Text style={styles.dateText}>{getDateLabel()}</Text>
+              <View style={styles.dotSep} />
+              <Ionicons
+                name={isConfigured ? 'cloud-done-outline' : 'cloud-offline-outline'}
+                size={12}
+                color={isConfigured ? COLORS.sage : COLORS.inkMuted}
+              />
+              <Text style={styles.dateText}>{isConfigured ? 'Cloud' : 'Offline'}</Text>
             </View>
-            <TouchableOpacity
-              style={styles.autoDetectBtn}
-              onPress={() => {
-                setNewUid(gate.lastScannedUid);
-                setNewTagLabel(`Móc khóa #${products.length + 1}`);
-                setShowAddModal(true);
-              }}
-            >
-              <Text style={styles.autoDetectBtnText}>⚡ Đăng ký ngay</Text>
-            </TouchableOpacity>
+          </View>
+
+          <ScalePress
+            style={styles.iconBtn}
+            onPress={handleManualSync}
+            disabled={isSyncing}
+            scaleTo={0.9}
+          >
+            <Animated.View style={{ transform: [{ rotate: spinDeg }] }}>
+              <Ionicons name="sync" size={20} color={COLORS.ink} />
+            </Animated.View>
+          </ScalePress>
+        </View>
+
+        {/* ---------------- Hero card ---------------- */}
+        <LinearGradient
+          colors={[COLORS.mocha, COLORS.espresso]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.hero}
+        >
+          <View style={styles.heroOrbA} />
+          <View style={styles.heroOrbB} />
+
+          <View style={styles.heroTop}>
+            <View style={styles.heroLabelRow}>
+              <Ionicons name="trending-up" size={14} color={COLORS.champagne} />
+              <Text style={styles.heroLabel}>Doanh thu đã thanh toán</Text>
+            </View>
+            <View style={styles.heroStatus}>
+              <PulseDot color={isGateOnline ? '#7FD3A4' : '#F08A7E'} size={7} />
+              <Text style={styles.heroStatusText}>
+                {isGateOnline ? 'ESP32 Online' : 'ESP32 Offline'}
+              </Text>
+            </View>
+          </View>
+
+          <Text style={styles.heroAmount} numberOfLines={1} adjustsFontSizeToFit>
+            {formatCurrency(paidTotal)}
+          </Text>
+          <Text style={styles.heroSub}>
+            {paidProducts.length} món đã thanh toán •{' '}
+            {isMqttConnected ? 'MQTT đã kết nối' : 'Đồng bộ qua Firebase'}
+          </Text>
+
+          <View style={styles.heroDivider} />
+
+          <View style={styles.heroStats}>
+            <View style={styles.heroStat}>
+              <Text style={styles.heroStatValue} numberOfLines={1} adjustsFontSizeToFit>
+                {formatCurrency(unpaidTotal)}
+              </Text>
+              <Text style={styles.heroStatLabel}>Chờ thanh toán</Text>
+            </View>
+            <View style={styles.heroStatSep} />
+            <View style={styles.heroStat}>
+              <Text style={styles.heroStatValue}>{products.length}</Text>
+              <Text style={styles.heroStatLabel}>Sản phẩm</Text>
+            </View>
+            <View style={styles.heroStatSep} />
+            <View style={styles.heroStat}>
+              <Text style={[styles.heroStatValue, alertCount > 0 && { color: '#F3A497' }]}>
+                {alertCount}
+              </Text>
+              <Text style={styles.heroStatLabel}>Cảnh báo</Text>
+            </View>
+          </View>
+        </LinearGradient>
+
+        {/* ---------------- Môi trường ---------------- */}
+        <View style={styles.envRow}>
+          <View style={styles.envCard}>
+            <View style={styles.envHead}>
+              <View style={[styles.envIcon, { backgroundColor: COLORS.amberSoft }]}>
+                <Ionicons name="thermometer-outline" size={18} color={COLORS.amber} />
+              </View>
+              <Text style={styles.envStatus}>{tempStatus}</Text>
+            </View>
+            <Text style={styles.envValue}>
+              {temp.toFixed(1)}
+              <Text style={styles.envUnit}>°C</Text>
+            </Text>
+            <Text style={styles.envLabel}>Nhiệt độ kho</Text>
+            <ProgressBar value={clamp01(temp / 50)} color={COLORS.amber} />
+          </View>
+
+          <View style={styles.envCard}>
+            <View style={styles.envHead}>
+              <View style={[styles.envIcon, { backgroundColor: COLORS.tealSoft }]}>
+                <Ionicons name="water-outline" size={18} color={COLORS.teal} />
+              </View>
+              <Text style={styles.envStatus}>{humStatus}</Text>
+            </View>
+            <Text style={styles.envValue}>
+              {hum.toFixed(0)}
+              <Text style={styles.envUnit}>%</Text>
+            </Text>
+            <Text style={styles.envLabel}>Độ ẩm không khí</Text>
+            <ProgressBar value={clamp01(hum / 100)} color={COLORS.teal} />
+          </View>
+        </View>
+
+        {/* ---------------- Banner chip mới ---------------- */}
+        {hasUnknownChip && (
+          <View style={styles.detectBanner}>
+            <View style={styles.detectIcon}>
+              <Ionicons name="sparkles" size={18} color={COLORS.amber} />
+            </View>
+            <View style={styles.detectText}>
+              <Text style={styles.detectTitle}>Phát hiện chip RFID mới</Text>
+              <Text style={styles.detectUid}>{gate.lastScannedUid}</Text>
+            </View>
+            <ScalePress style={styles.detectBtn} onPress={() => openAddModal(gate.lastScannedUid)}>
+              <Text style={styles.detectBtnText}>Đăng ký</Text>
+              <Ionicons name="arrow-forward" size={14} color={COLORS.champagne} />
+            </ScalePress>
           </View>
         )}
 
-      {/* Nút THÊM SẢN PHẨM MỚI */}
-      <View style={styles.addBtnContainer}>
-        <TouchableOpacity
-          style={styles.btnAddProduct}
-          onPress={() => {
-            if (gate.lastScannedUid && !products.some(p => p.tagUid.toUpperCase() === gate.lastScannedUid.toUpperCase())) {
-              setNewUid(gate.lastScannedUid);
-            }
-            setNewTagLabel(`Móc khóa #${products.length + 1}`);
-            setShowAddModal(true);
-          }}
-        >
-          <Text style={styles.btnAddProductText}>➕ Thêm Món Đồ / Gán Chip RFID Mới</Text>
-        </TouchableOpacity>
-      </View>
+        {/* ---------------- Tìm kiếm (tab sản phẩm) ---------------- */}
+        {activeTab !== 'security' && (
+          <View style={styles.searchBar}>
+            <Ionicons name="search" size={18} color={COLORS.inkMuted} />
+            <TextInput
+              style={styles.searchInput}
+              placeholder="Tìm theo tên, danh mục hoặc UID..."
+              placeholderTextColor={COLORS.inkMuted}
+              value={query}
+              onChangeText={setQuery}
+              autoCorrect={false}
+            />
+            {query ? (
+              <Pressable onPress={() => setQuery('')} hitSlop={10}>
+                <Ionicons name="close-circle" size={18} color={COLORS.inkMuted} />
+              </Pressable>
+            ) : null}
+          </View>
+        )}
 
-      {/* 3 Tab chính */}
-      <View style={styles.tabContainer}>
-        {/* Tab 1: Chưa thanh toán */}
-        <TouchableOpacity
-          style={[styles.tabButton, activeTab === 'unpaid' && styles.tabButtonActiveUnpaid]}
-          onPress={() => setActiveTab('unpaid')}
-        >
-          <Text style={[styles.tabText, activeTab === 'unpaid' && styles.tabTextActiveUnpaid]}>
-            🛒 Chưa trả ({unpaidProducts.length})
-          </Text>
-        </TouchableOpacity>
-
-        {/* Tab 2: Đã thanh toán */}
-        <TouchableOpacity
-          style={[styles.tabButton, activeTab === 'paid' && styles.tabButtonActivePaid]}
-          onPress={() => setActiveTab('paid')}
-        >
-          <Text style={[styles.tabText, activeTab === 'paid' && styles.tabTextActivePaid]}>
-            ✅ Đã trả ({paidProducts.length})
-          </Text>
-        </TouchableOpacity>
-
-        {/* Tab 3: Cổng an ninh */}
-        <TouchableOpacity
-          style={[styles.tabButton, activeTab === 'security' && styles.tabButtonActiveSecurity]}
-          onPress={() => setActiveTab('security')}
-        >
-          <Text style={[styles.tabText, activeTab === 'security' && styles.tabTextActiveSecurity]}>
-            🛡️ Cổng & Log ({logs.length})
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Nội dung danh sách theo Tab */}
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        {/* TAB 1: SẢN PHẨM CHƯA THANH TOÁN */}
+        {/* ================= TAB 1: CHƯA THANH TOÁN ================= */}
         {activeTab === 'unpaid' && (
           <View>
-            <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>Mặt hàng chưa thanh toán ({unpaidProducts.length})</Text>
-              <Text style={styles.sectionSubtitle}>
-                Khách mang những món này qua cổng sẽ bị còi Buzzer hú báo động!
-              </Text>
-            </View>
-
-            {unpaidProducts.length === 0 ? (
-              <View style={styles.emptyContainer}>
-                <Text style={styles.emptyIcon}>🎉</Text>
-                <Text style={styles.emptyTitle}>Tất cả đã thanh toán!</Text>
-                <Text style={styles.emptyDesc}>
-                  Không còn món đồ nào chưa trả tiền. Hãy sang tab "✅ Đã trả" để xem hoặc bấm "➕ Thêm món đồ" ở trên!
-                </Text>
-              </View>
+            <SectionHeader
+              title="Chờ thanh toán"
+              subtitle="Mang qua cổng ESP32 sẽ kích hoạt còi báo động"
+              count={visibleUnpaid.length}
+              tone="rose"
+            />
+            {visibleUnpaid.length === 0 ? (
+              <EmptyState
+                icon={q ? 'search-outline' : 'sparkles-outline'}
+                title={q ? 'Không tìm thấy sản phẩm' : 'Tất cả đã thanh toán!'}
+                desc={
+                  q
+                    ? `Không có món nào khớp với "${query}".`
+                    : 'Không còn món đồ nào chưa trả tiền. Nhấn nút + để thêm món đồ mới.'
+                }
+              />
             ) : (
-              unpaidProducts.map((item) => (
-                <View key={item.id} style={[styles.productCard, styles.productCardUnpaid]}>
-                  {/* Dòng trên */}
-                  <View style={styles.productTopRow}>
-                    <Text style={styles.productIcon}>{item.icon}</Text>
-                    <View style={styles.productInfo}>
-                      <Text style={styles.productName}>{item.name}</Text>
-                      <Text style={styles.productCategory}>{item.category}</Text>
-                      <Text style={styles.productPrice}>{formatCurrency(item.price)}</Text>
-                    </View>
-                    <TouchableOpacity
-                      style={styles.btnDelete}
-                      onPress={() => handleDeleteProduct(item)}
-                    >
-                      <Text style={styles.btnDeleteText}>✕</Text>
-                    </TouchableOpacity>
-                  </View>
-
-                  {/* Dòng UID RFID */}
-                  <View style={styles.rfidBox}>
-                    <Text style={styles.rfidLabel}>🏷️ {item.tagLabel}:</Text>
-                    {editingId === item.id ? (
-                      <View style={styles.editUidRow}>
-                        <TextInput
-                          style={styles.uidInput}
-                          value={tempUid}
-                          onChangeText={setTempUid}
-                          placeholder="UID HEX"
-                          autoCapitalize="characters"
-                        />
-                        <TouchableOpacity
-                          style={styles.saveUidBtn}
-                          onPress={() => handleSaveUid(item.id)}
-                        >
-                          <Text style={styles.saveUidText}>Lưu</Text>
-                        </TouchableOpacity>
-                      </View>
-                    ) : (
-                      <TouchableOpacity
-                        style={styles.uidDisplay}
-                        onPress={() => {
-                          setEditingId(item.id);
-                          setTempUid(item.tagUid);
-                        }}
-                      >
-                        <Text style={styles.uidText}>{item.tagUid}</Text>
-                        <Text style={styles.editHint}> (Chạm sửa)</Text>
-                      </TouchableOpacity>
-                    )}
-                  </View>
-
-                  {/* Nút hành động */}
-                  <View style={styles.actionRow}>
-                    <TouchableOpacity
-                      style={styles.btnPayMain}
-                      onPress={() => handlePayProduct(item)}
-                    >
-                      <Text style={styles.btnPayMainText}>💳 Thanh toán ngay</Text>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-                      style={styles.btnSimulateAlert}
-                      onPress={() => simulateGateScan(item)}
-                    >
-                      <Text style={styles.btnSimulateText}>🚪 Thử trộm</Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
+              visibleUnpaid.map((item) => (
+                <ProductCard
+                  key={item.id}
+                  item={item}
+                  mode="unpaid"
+                  isEditing={editingId === item.id}
+                  tempUid={tempUid}
+                  onChangeTempUid={setTempUid}
+                  onStartEdit={() => {
+                    animateLayout();
+                    setEditingId(item.id);
+                    setTempUid(item.tagUid);
+                  }}
+                  onCancelEdit={() => {
+                    animateLayout();
+                    setEditingId(null);
+                    setTempUid('');
+                  }}
+                  onSaveUid={() => handleSaveUid(item.id)}
+                  onPrimary={() => handlePayProduct(item)}
+                  onSecondary={() => simulateGateScan(item)}
+                  onDelete={() => handleDeleteProduct(item)}
+                />
               ))
             )}
           </View>
         )}
 
-        {/* TAB 2: SẢN PHẨM ĐÃ THANH TOÁN */}
+        {/* ================= TAB 2: ĐÃ THANH TOÁN ================= */}
         {activeTab === 'paid' && (
           <View>
-            <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>Mặt hàng đã thanh toán ({paidProducts.length})</Text>
-              <Text style={styles.sectionSubtitle}>
-                Những món này được phép qua cổng an ninh an toàn.
-              </Text>
-            </View>
-
-            {paidProducts.length === 0 ? (
-              <View style={styles.emptyContainer}>
-                <Text style={styles.emptyIcon}>📦</Text>
-                <Text style={styles.emptyTitle}>Chưa có món nào được trả tiền</Text>
-                <Text style={styles.emptyDesc}>
-                  Hãy sang tab "🛒 Chưa trả" và bấm "Thanh toán ngay" để món đồ chuyển sang đây!
-                </Text>
-              </View>
+            <SectionHeader
+              title="Đã thanh toán"
+              subtitle="Hợp lệ và được phép đi qua cổng an ninh"
+              count={visiblePaid.length}
+              tone="sage"
+            />
+            {visiblePaid.length === 0 ? (
+              <EmptyState
+                icon={q ? 'search-outline' : 'bag-handle-outline'}
+                title={q ? 'Không tìm thấy sản phẩm' : 'Chưa có món nào được trả tiền'}
+                desc={
+                  q
+                    ? `Không có món nào khớp với "${query}".`
+                    : 'Chuyển sang mục "Chưa trả" và nhấn "Thanh toán" để hoàn tất đơn hàng.'
+                }
+              />
             ) : (
-              paidProducts.map((item) => (
-                <View key={item.id} style={[styles.productCard, styles.productCardPaid]}>
-                  {/* Dòng trên */}
-                  <View style={styles.productTopRow}>
-                    <Text style={styles.productIcon}>{item.icon}</Text>
-                    <View style={styles.productInfo}>
-                      <Text style={styles.productName}>{item.name}</Text>
-                      <Text style={styles.productCategory}>{item.category}</Text>
-                      <Text style={styles.productPrice}>{formatCurrency(item.price)}</Text>
-                    </View>
-                    <TouchableOpacity
-                      style={styles.btnDelete}
-                      onPress={() => handleDeleteProduct(item)}
-                    >
-                      <Text style={styles.btnDeleteText}>✕</Text>
-                    </TouchableOpacity>
-                  </View>
-
-                  {/* Dòng UID RFID */}
-                  <View style={styles.rfidBox}>
-                    <Text style={styles.rfidLabel}>🏷️ {item.tagLabel}:</Text>
-                    <Text style={styles.uidText}>{item.tagUid}</Text>
-                  </View>
-
-                  {/* Nút hành động */}
-                  <View style={styles.actionRow}>
-                    <TouchableOpacity
-                      style={styles.btnRefundMain}
-                      onPress={() => handleRefundProduct(item)}
-                    >
-                      <Text style={styles.btnRefundMainText}>↩️ Đặt lại: Chưa thanh toán</Text>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-                      style={styles.btnSimulatePass}
-                      onPress={() => simulateGateScan(item)}
-                    >
-                      <Text style={styles.btnSimulateText}>🚪 Thử hợp lệ</Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
+              visiblePaid.map((item) => (
+                <ProductCard
+                  key={item.id}
+                  item={item}
+                  mode="paid"
+                  isEditing={false}
+                  tempUid=""
+                  onChangeTempUid={() => {}}
+                  onStartEdit={() => {}}
+                  onCancelEdit={() => {}}
+                  onSaveUid={() => {}}
+                  onPrimary={() => handleRefundProduct(item)}
+                  onSecondary={() => simulateGateScan(item)}
+                  onDelete={() => handleDeleteProduct(item)}
+                />
               ))
             )}
           </View>
         )}
 
-        {/* TAB 3: CỔNG AN NINH & LOGS */}
+        {/* ================= TAB 3: AN NINH ================= */}
         {activeTab === 'security' && (
           <View>
-            <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>Giám sát cổng an ninh ESP32</Text>
-              <Text style={styles.sectionSubtitle}>
-                Dữ liệu quẹt thẻ thực tế nhận từ cảm biến RC522 qua Firebase
-              </Text>
-            </View>
+            <SectionHeader
+              title="Cổng an ninh"
+              subtitle="Dữ liệu RC522 thời gian thực qua Firebase & MQTT"
+            />
 
-            {/* Thông tin Cổng hiện tại */}
-            <View style={styles.gateStatusBox}>
-              <Text style={styles.gateStatusTitle}>Trạng thái cổng:</Text>
-              <Text style={styles.gateStatusMsg}>{gate.lastMessage || 'Cổng an ninh sẵn sàng'}</Text>
-              {Boolean(gate.lastScannedUid) && (
-                <Text style={styles.gateStatusUid}>Thẻ vừa quét: {gate.lastScannedUid}</Text>
-              )}
-            </View>
+            {/* Trạng thái cổng */}
+            {(() => {
+              const s = gate.lastScannedStatus;
+              const tone =
+                s === 'ALERT'
+                  ? { c: COLORS.rose, soft: COLORS.roseSoft, icon: 'warning' as IconName, label: 'Cảnh báo' }
+                  : s === 'PASS'
+                  ? { c: COLORS.sage, soft: COLORS.sageSoft, icon: 'shield-checkmark' as IconName, label: 'Hợp lệ' }
+                  : { c: COLORS.bronze, soft: COLORS.amberSoft, icon: 'scan' as IconName, label: 'Sẵn sàng' };
+              return (
+                <View style={styles.gateCard}>
+                  <View style={[styles.gateIconRing, { borderColor: tone.soft }]}>
+                    <View style={[styles.gateIcon, { backgroundColor: tone.soft }]}>
+                      <Ionicons name={tone.icon} size={24} color={tone.c} />
+                    </View>
+                  </View>
+                  <View style={styles.gateInfo}>
+                    <View style={[styles.pill, { backgroundColor: tone.soft, alignSelf: 'flex-start' }]}>
+                      <Text style={[styles.pillText, { color: tone.c }]}>{tone.label}</Text>
+                    </View>
+                    <Text style={styles.gateMsg} numberOfLines={2}>
+                      {gate.lastMessage || 'Cổng an ninh sẵn sàng'}
+                    </Text>
+                    {Boolean(gate.lastScannedUid) && (
+                      <View style={styles.gateMeta}>
+                        <Ionicons name="radio-outline" size={12} color={COLORS.inkMuted} />
+                        <Text style={styles.gateUid}>{gate.lastScannedUid}</Text>
+                        <View style={styles.dotSep} />
+                        <Ionicons name="time-outline" size={12} color={COLORS.inkMuted} />
+                        <Text style={styles.gateTime} numberOfLines={1}>
+                          {gate.lastSeen}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                </View>
+              );
+            })()}
 
-            {/* Hộp điều khiển & Kết nối MQTT */}
-            <View style={styles.mqttControlCard}>
-              <View style={styles.mqttHeaderRow}>
-                <Text style={styles.mqttTitle}>⚡ Điều khiển Cổng qua MQTT</Text>
+            {/* Điều khiển MQTT */}
+            <View style={styles.mqttCard}>
+              <View style={styles.mqttHead}>
+                <View style={styles.mqttHeadIcon}>
+                  <Ionicons name="git-network-outline" size={18} color={COLORS.bronze} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.mqttTitle}>Điều khiển Barrier</Text>
+                  <Text style={styles.mqttSub}>MQTT over WebSocket • ESP32</Text>
+                </View>
                 <View
                   style={[
-                    styles.mqttBadge,
-                    isMqttConnected ? styles.mqttBadgeOnline : styles.mqttBadgeOffline,
+                    styles.pill,
+                    { backgroundColor: isMqttConnected ? COLORS.sageSoft : COLORS.sand },
                   ]}
                 >
-                  <Text style={styles.mqttBadgeText}>
-                    {isMqttConnected ? '● MQTT ONLINE' : '○ MQTT OFFLINE'}
+                  {isMqttConnected ? <PulseDot color={COLORS.sage} size={6} /> : null}
+                  <Text
+                    style={[
+                      styles.pillText,
+                      { color: isMqttConnected ? COLORS.sage : COLORS.inkMuted },
+                    ]}
+                  >
+                    {isMqttConnected ? 'Online' : 'Offline'}
                   </Text>
                 </View>
               </View>
-              <Text style={styles.mqttSubtitle}>Broker: broker.hivemq.com (Port 8000/WS)</Text>
 
-              <View style={styles.mqttBtnRow}>
-                <TouchableOpacity
-                  style={[styles.mqttBtn, styles.mqttBtnOpen]}
-                  onPress={() => {
-                    const sent = mqttService.sendGateCommand('OPEN');
-                    if (sent) {
-                      Alert.alert('Đã gửi lệnh', 'Lệnh MỞ CỔNG liên tục đã gửi qua MQTT tới ESP32!');
-                    } else {
-                      Alert.alert('Chưa kết nối', 'App chưa kết nối được MQTT broker.');
-                    }
-                  }}
-                >
-                  <Text style={styles.mqttBtnText}>🚪 MỞ CỔNG</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[styles.mqttBtn, styles.mqttBtnClose]}
-                  onPress={() => {
-                    const sent = mqttService.sendGateCommand('CLOSE');
-                    if (sent) {
-                      Alert.alert('Đã gửi lệnh', 'Lệnh ĐÓNG CỔNG đã gửi qua MQTT tới ESP32!');
-                    } else {
-                      Alert.alert('Chưa kết nối', 'App chưa kết nối được MQTT broker.');
-                    }
-                  }}
-                >
-                  <Text style={styles.mqttBtnText}>🔒 ĐÓNG CỔNG</Text>
-                </TouchableOpacity>
+              <View style={styles.mqttBtns}>
+                <ScalePress style={[styles.mqttBtn, styles.mqttBtnOpen]} onPress={() => sendGate('OPEN')}>
+                  <View style={styles.mqttBtnIcon}>
+                    <Ionicons name="lock-open-outline" size={20} color="#FFFFFF" />
+                  </View>
+                  <Text style={styles.mqttBtnText}>Mở cổng</Text>
+                </ScalePress>
+                <ScalePress style={[styles.mqttBtn, styles.mqttBtnClose]} onPress={() => sendGate('CLOSE')}>
+                  <View style={styles.mqttBtnIcon}>
+                    <Ionicons name="lock-closed-outline" size={20} color={COLORS.champagne} />
+                  </View>
+                  <Text style={styles.mqttBtnText}>Đóng cổng</Text>
+                </ScalePress>
               </View>
             </View>
 
-            <Text style={[styles.sectionTitle, { marginTop: 16, marginBottom: 8 }]}>
-              Lịch sử quét ({logs.length})
-            </Text>
+            {/* Lịch sử quét */}
+            <View style={styles.logHead}>
+              <Text style={styles.sectionTitle}>Lịch sử quét</Text>
+              {logs.length > 0 && (
+                <ScalePress
+                  style={styles.clearBtn}
+                  onPress={() => {
+                    animateLayout();
+                    setLogs([]);
+                  }}
+                >
+                  <Ionicons name="trash-outline" size={13} color={COLORS.inkSoft} />
+                  <Text style={styles.clearBtnText}>Xóa</Text>
+                </ScalePress>
+              )}
+            </View>
 
             {logs.length === 0 ? (
-              <View style={styles.emptyContainer}>
-                <Text style={styles.emptyIcon}>🛡️</Text>
-                <Text style={styles.emptyTitle}>Chưa có lượt quét nào</Text>
-                <Text style={styles.emptyDesc}>
-                  Khi bạn cầm thẻ quẹt qua đầu đọc RC522 của ESP32, nhật ký sẽ hiện ở đây!
-                </Text>
-              </View>
+              <EmptyState
+                icon="shield-outline"
+                title="Chưa có lượt quét nào"
+                desc="Khi bạn quẹt thẻ qua đầu đọc RC522 của ESP32, nhật ký sẽ hiển thị tại đây."
+              />
             ) : (
-              logs.map((log) => (
-                <View
-                  key={log.id}
-                  style={[
-                    styles.logCard,
-                    log.status === 'ALERT' ? styles.logAlert : styles.logPass,
-                  ]}
-                >
-                  <View style={styles.logHeader}>
-                    <Text style={styles.logStatus}>
-                      {log.status === 'ALERT' ? '🚨 CẢNH BÁO TRỘM' : '✅ QUA CỔNG HỢP LỆ'}
-                    </Text>
-                    <Text style={styles.logTime}>
-                      🕒 {log.time && log.time.includes('s') && !log.time.includes(':') ? `${log.time} trước` : log.time}
-                    </Text>
-                  </View>
-                  <Text style={styles.logProduct}>{log.productName}</Text>
-                  <Text style={styles.logUid}>UID RFID: {log.tagUid}</Text>
-                  <Text style={styles.logMsg}>{log.message}</Text>
-                </View>
-              ))
-            )}
-
-            {logs.length > 0 && (
-              <TouchableOpacity
-                style={styles.clearLogsBtn}
-                onPress={() => setLogs([])}
-              >
-                <Text style={styles.clearLogsText}>Xóa nhật ký hiển thị</Text>
-              </TouchableOpacity>
+              <View>
+                {logs.slice(0, MAX_LOGS_SHOWN).map((log, idx, arr) => {
+                  const isAlert = log.status === 'ALERT';
+                  const c = isAlert ? COLORS.rose : COLORS.sage;
+                  return (
+                    <View key={log.id} style={styles.tlRow}>
+                      <View style={styles.tlRail}>
+                        <View style={[styles.tlDot, { backgroundColor: c }]}>
+                          <Ionicons name={isAlert ? 'warning' : 'checkmark'} size={11} color="#FFFFFF" />
+                        </View>
+                        {idx < arr.length - 1 ? <View style={styles.tlLine} /> : null}
+                      </View>
+                      <View style={styles.tlCard}>
+                        <View style={styles.tlTop}>
+                          <Text style={[styles.tlStatus, { color: c }]}>
+                            {isAlert ? 'Cảnh báo trộm' : 'Qua cổng hợp lệ'}
+                          </Text>
+                          <Text style={styles.tlTime} numberOfLines={1}>
+                            {formatLogTime(log.time)}
+                          </Text>
+                        </View>
+                        <Text style={styles.tlProduct} numberOfLines={1}>
+                          {log.productName}
+                        </Text>
+                        <View style={styles.tlMeta}>
+                          <Ionicons name="radio-outline" size={12} color={COLORS.inkMuted} />
+                          <Text style={styles.tlUid}>{log.tagUid}</Text>
+                        </View>
+                        {log.message ? (
+                          <Text style={styles.tlMsg} numberOfLines={2}>
+                            {log.message}
+                          </Text>
+                        ) : null}
+                      </View>
+                    </View>
+                  );
+                })}
+                {logs.length > MAX_LOGS_SHOWN && (
+                  <Text style={styles.moreLogs}>
+                    Đang hiển thị {MAX_LOGS_SHOWN}/{logs.length} lượt quét gần nhất
+                  </Text>
+                )}
+              </View>
             )}
           </View>
         )}
       </ScrollView>
 
-      {/* MODAL THÊM SẢN PHẨM MỚI */}
+      {/* ---------------- Floating bottom navigation ---------------- */}
+      <View pointerEvents="box-none" style={[styles.navWrap, { bottom: navBottom }]}>
+        <View style={styles.navBar}>
+          {TABS.map((t) => {
+            const active = activeTab === t.key;
+            return (
+              <ScalePress
+                key={t.key}
+                onPress={() => changeTab(t.key)}
+                style={[styles.navItem, active && styles.navItemActive]}
+                scaleTo={0.92}
+              >
+                <Ionicons
+                  name={active ? t.iconActive : t.icon}
+                  size={20}
+                  color={active ? COLORS.champagne : COLORS.inkSoft}
+                />
+                {active ? (
+                  <Text style={styles.navLabelActive} numberOfLines={1}>
+                    {t.label}
+                  </Text>
+                ) : t.count > 0 ? (
+                  <View
+                    style={[
+                      styles.navBadge,
+                      t.key === 'security' && { backgroundColor: COLORS.rose },
+                    ]}
+                  >
+                    <Text style={styles.navBadgeText}>{t.count > 99 ? '99+' : t.count}</Text>
+                  </View>
+                ) : null}
+              </ScalePress>
+            );
+          })}
+        </View>
+
+        <ScalePress style={styles.fab} onPress={() => openAddModal()} scaleTo={0.9}>
+          <LinearGradient
+            colors={[COLORS.mocha, COLORS.espresso]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.fabInner}
+          >
+            <Ionicons name="add" size={28} color={COLORS.champagne} />
+          </LinearGradient>
+        </ScalePress>
+      </View>
+
+      {/* ---------------- Toast ---------------- */}
+      <Toast toast={toast} top={insets.top + 8} onHide={() => setToast(null)} />
+
+      {/* ---------------- Bottom sheet: Thêm sản phẩm ---------------- */}
       <Modal
         visible={showAddModal}
-        transparent={true}
+        transparent
         animationType="slide"
         onRequestClose={() => setShowAddModal(false)}
       >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>➕ Thêm Món Đồ / Gán Chip</Text>
-              <TouchableOpacity onPress={() => setShowAddModal(false)}>
-                <Text style={styles.modalCloseText}>✕</Text>
-              </TouchableOpacity>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.sheetOverlay}
+        >
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setShowAddModal(false)} />
+          <View style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, 16) + 8 }]}>
+            <View style={styles.sheetHandle} />
+            <View style={styles.sheetHead}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.sheetTitle}>Thêm món đồ mới</Text>
+                <Text style={styles.sheetSub}>Gán chip RFID để theo dõi qua cổng an ninh</Text>
+              </View>
+              <ScalePress style={styles.sheetClose} onPress={() => setShowAddModal(false)} scaleTo={0.9}>
+                <Ionicons name="close" size={18} color={COLORS.inkSoft} />
+              </ScalePress>
             </View>
 
-            <ScrollView showsVerticalScrollIndicator={false}>
-              {/* Chọn Biểu tượng */}
-              <Text style={styles.inputLabel}>Chọn Biểu Tượng:</Text>
-              <View style={styles.iconRow}>
-                {ICONS.map((ic) => (
-                  <TouchableOpacity
-                    key={ic}
-                    style={[styles.iconChoice, newIcon === ic && styles.iconChoiceSelected]}
-                    onPress={() => setNewIcon(ic)}
-                  >
-                    <Text style={styles.iconChoiceText}>{ic}</Text>
-                  </TouchableOpacity>
-                ))}
+            <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+              {/* Preview */}
+              <View style={styles.previewCard}>
+                <View style={styles.previewIcon}>
+                  <Text style={{ fontSize: 30 }}>{newIcon}</Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.previewName} numberOfLines={1}>
+                    {newName.trim() || 'Tên món đồ'}
+                  </Text>
+                  <Text style={styles.previewPrice}>
+                    {formatCurrency(parseInt(newPrice, 10) || 0)}
+                  </Text>
+                </View>
+                <View style={styles.previewUid}>
+                  <Text style={styles.previewUidText} numberOfLines={1}>
+                    {newUid.trim().toUpperCase() || 'UID'}
+                  </Text>
+                </View>
               </View>
 
-              {/* Tên sản phẩm */}
-              <Text style={styles.inputLabel}>Tên Món Đồ:</Text>
-              <TextInput
-                style={styles.formInput}
-                placeholder="Ví dụ: Áo Khoác Gió Nam"
-                value={newName}
-                onChangeText={setNewName}
-              />
+              <Text style={styles.fieldLabel}>Biểu tượng</Text>
+              <View style={styles.iconGrid}>
+                {ICONS.map((ic) => {
+                  const selected = newIcon === ic;
+                  return (
+                    <ScalePress
+                      key={ic}
+                      style={[styles.iconChoice, selected && styles.iconChoiceSelected]}
+                      onPress={() => {
+                        haptic.light();
+                        setNewIcon(ic);
+                      }}
+                      scaleTo={0.9}
+                    >
+                      <Text style={styles.iconChoiceText}>{ic}</Text>
+                      {selected ? (
+                        <View style={styles.iconCheck}>
+                          <Ionicons name="checkmark" size={10} color={COLORS.champagne} />
+                        </View>
+                      ) : null}
+                    </ScalePress>
+                  );
+                })}
+              </View>
 
-              {/* Giá tiền */}
-              <Text style={styles.inputLabel}>Giá Tiền (VNĐ):</Text>
-              <TextInput
-                style={styles.formInput}
-                placeholder="250000"
-                keyboardType="numeric"
-                value={newPrice}
-                onChangeText={setNewPrice}
-              />
+              <Text style={styles.fieldLabel}>Tên món đồ</Text>
+              <View style={styles.field}>
+                <Ionicons name="shirt-outline" size={18} color={COLORS.inkMuted} />
+                <TextInput
+                  style={styles.fieldInput}
+                  placeholder="Ví dụ: Áo Khoác Gió Nam"
+                  placeholderTextColor={COLORS.inkMuted}
+                  value={newName}
+                  onChangeText={setNewName}
+                />
+              </View>
 
-              {/* Mã UID RFID */}
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 10, marginBottom: 4 }}>
-                <Text style={[styles.inputLabel, { marginTop: 0, marginBottom: 0 }]}>Mã UID Chip RFID:</Text>
+              <Text style={styles.fieldLabel}>Giá bán</Text>
+              <View style={styles.field}>
+                <Ionicons name="cash-outline" size={18} color={COLORS.inkMuted} />
+                <TextInput
+                  style={styles.fieldInput}
+                  placeholder="250000"
+                  placeholderTextColor={COLORS.inkMuted}
+                  keyboardType="numeric"
+                  value={newPrice}
+                  onChangeText={(v) => setNewPrice(v.replace(/[^0-9]/g, ''))}
+                />
+                <Text style={styles.fieldSuffix}>VNĐ</Text>
+              </View>
+
+              <View style={styles.fieldLabelRow}>
+                <Text style={[styles.fieldLabel, { marginTop: 0, marginBottom: 0 }]}>Mã UID chip RFID</Text>
                 {Boolean(gate.lastScannedUid) && (
-                  <TouchableOpacity
-                    onPress={() => setNewUid(gate.lastScannedUid)}
-                    style={styles.btnQuickFill}
-                  >
-                    <Text style={styles.btnQuickFillText}>⚡ Lấy mã vừa quẹt ({gate.lastScannedUid})</Text>
-                  </TouchableOpacity>
+                  <ScalePress style={styles.quickFill} onPress={() => setNewUid(gate.lastScannedUid)}>
+                    <Ionicons name="flash" size={11} color={COLORS.amber} />
+                    <Text style={styles.quickFillText}>Dùng {gate.lastScannedUid}</Text>
+                  </ScalePress>
                 )}
               </View>
-              <TextInput
-                style={[styles.formInput, styles.uidFormInput]}
-                placeholder="Ví dụ: A1B2C3D4"
-                autoCapitalize="characters"
-                value={newUid}
-                onChangeText={setNewUid}
-              />
-              <Text style={styles.uidHelpText}>
-                💡 Tự động điền khi quẹt chip vào cổng ESP32!
-              </Text>
+              <View style={styles.field}>
+                <Ionicons name="radio-outline" size={18} color={COLORS.inkMuted} />
+                <TextInput
+                  style={[styles.fieldInput, styles.fieldMono]}
+                  placeholder="A1B2C3D4"
+                  placeholderTextColor={COLORS.inkMuted}
+                  autoCapitalize="characters"
+                  autoCorrect={false}
+                  value={newUid}
+                  onChangeText={setNewUid}
+                />
+              </View>
+              <Text style={styles.fieldHint}>Quẹt chip qua cổng ESP32 để tự động nhận mã.</Text>
 
-              {/* Tên nhãn móc khóa */}
-              <Text style={styles.inputLabel}>Nhãn Móc Khóa:</Text>
-              <TextInput
-                style={styles.formInput}
-                placeholder="Ví dụ: Móc khóa #3"
-                value={newTagLabel}
-                onChangeText={setNewTagLabel}
-              />
+              <Text style={styles.fieldLabel}>Nhãn móc khóa</Text>
+              <View style={styles.field}>
+                <Ionicons name="pricetag-outline" size={18} color={COLORS.inkMuted} />
+                <TextInput
+                  style={styles.fieldInput}
+                  placeholder="Ví dụ: Móc khóa #3"
+                  placeholderTextColor={COLORS.inkMuted}
+                  value={newTagLabel}
+                  onChangeText={setNewTagLabel}
+                />
+              </View>
 
-              {/* Nút Xác Nhận */}
-              <View style={styles.modalBtnRow}>
-                <TouchableOpacity
-                  style={styles.btnCancel}
-                  onPress={() => setShowAddModal(false)}
-                >
-                  <Text style={styles.btnCancelText}>Hủy</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={styles.btnConfirmAdd}
-                  onPress={handleCreateProduct}
-                >
-                  <Text style={styles.btnConfirmAddText}>Lưu Lên Hệ Thống</Text>
-                </TouchableOpacity>
+              <View style={styles.sheetBtns}>
+                <ScalePress style={styles.btnGhost} onPress={() => setShowAddModal(false)}>
+                  <Text style={styles.btnGhostText}>Hủy</Text>
+                </ScalePress>
+                <ScalePress style={styles.btnPrimaryWrap} onPress={handleCreateProduct}>
+                  <LinearGradient
+                    colors={[COLORS.mocha, COLORS.espresso]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={styles.btnPrimary}
+                  >
+                    <Ionicons name="cloud-upload-outline" size={18} color={COLORS.champagne} />
+                    <Text style={styles.btnPrimaryText}>Lưu lên hệ thống</Text>
+                  </LinearGradient>
+                </ScalePress>
               </View>
             </ScrollView>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
-    </SafeAreaView>
+    </View>
   );
 }
 
+/* =================================================================== */
+/* Section header                                                       */
+/* =================================================================== */
+function SectionHeader({
+  title,
+  subtitle,
+  count,
+  tone,
+}: {
+  title: string;
+  subtitle: string;
+  count?: number;
+  tone?: 'rose' | 'sage';
+}) {
+  const c = tone === 'rose' ? COLORS.rose : COLORS.sage;
+  const soft = tone === 'rose' ? COLORS.roseSoft : COLORS.sageSoft;
+  return (
+    <View style={styles.sectionHead}>
+      <View style={{ flex: 1 }}>
+        <Text style={styles.sectionTitle}>{title}</Text>
+        <Text style={styles.sectionSub}>{subtitle}</Text>
+      </View>
+      {typeof count === 'number' && (
+        <View style={[styles.countChip, { backgroundColor: soft }]}>
+          <Text style={[styles.countChipText, { color: c }]}>{count}</Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
+/* =================================================================== */
+/* Product card                                                         */
+/* =================================================================== */
+type ProductCardProps = {
+  item: Product;
+  mode: 'unpaid' | 'paid';
+  isEditing: boolean;
+  tempUid: string;
+  onChangeTempUid: (v: string) => void;
+  onStartEdit: () => void;
+  onCancelEdit: () => void;
+  onSaveUid: () => void;
+  onPrimary: () => void;
+  onSecondary: () => void;
+  onDelete: () => void;
+};
+
+function ProductCard({
+  item,
+  mode,
+  isEditing,
+  tempUid,
+  onChangeTempUid,
+  onStartEdit,
+  onCancelEdit,
+  onSaveUid,
+  onPrimary,
+  onSecondary,
+  onDelete,
+}: ProductCardProps) {
+  const isPaid = mode === 'paid';
+
+  return (
+    <View style={styles.card}>
+      {/* Hàng trên */}
+      <View style={styles.cardTop}>
+        <View style={styles.cardIcon}>
+          <Text style={styles.cardEmoji}>{item.icon}</Text>
+        </View>
+        <View style={styles.cardInfo}>
+          <Text style={styles.cardName} numberOfLines={1}>
+            {item.name}
+          </Text>
+          <Text style={styles.cardCategory} numberOfLines={1}>
+            {item.category}
+          </Text>
+          <View style={styles.cardPriceRow}>
+            <Text style={styles.cardPrice}>{formatCurrency(item.price)}</Text>
+            <View
+              style={[
+                styles.pill,
+                {
+                  backgroundColor: isPaid ? COLORS.sageSoft : COLORS.roseSoft,
+                },
+              ]}
+            >
+              <View
+                style={[styles.pillDot, { backgroundColor: isPaid ? COLORS.sage : COLORS.rose }]}
+              />
+              <Text style={[styles.pillText, { color: isPaid ? COLORS.sage : COLORS.rose }]}>
+                {isPaid ? 'Đã thanh toán' : 'Chưa thanh toán'}
+              </Text>
+            </View>
+          </View>
+        </View>
+        <ScalePress style={styles.cardDelete} onPress={onDelete} scaleTo={0.88} hitSlop={8}>
+          <Ionicons name="trash-outline" size={15} color={COLORS.inkMuted} />
+        </ScalePress>
+      </View>
+
+      {/* Dải RFID */}
+      <View style={styles.rfid}>
+        <View style={styles.rfidLeft}>
+          <View style={styles.rfidIcon}>
+            <Ionicons name="radio-outline" size={14} color={COLORS.bronze} />
+          </View>
+          <Text style={styles.rfidLabel} numberOfLines={1}>
+            {item.tagLabel}
+          </Text>
+        </View>
+
+        {isEditing ? (
+          <View style={styles.rfidEdit}>
+            <TextInput
+              style={styles.rfidInput}
+              value={tempUid}
+              onChangeText={onChangeTempUid}
+              placeholder="UID HEX"
+              placeholderTextColor={COLORS.inkMuted}
+              autoCapitalize="characters"
+              autoCorrect={false}
+              autoFocus
+              onSubmitEditing={onSaveUid}
+            />
+            <ScalePress style={styles.rfidSave} onPress={onSaveUid} scaleTo={0.9}>
+              <Ionicons name="checkmark" size={16} color={COLORS.champagne} />
+            </ScalePress>
+            <ScalePress style={styles.rfidCancel} onPress={onCancelEdit} scaleTo={0.9}>
+              <Ionicons name="close" size={16} color={COLORS.inkSoft} />
+            </ScalePress>
+          </View>
+        ) : (
+          <Pressable
+            style={styles.rfidRight}
+            onPress={isPaid ? undefined : onStartEdit}
+            disabled={isPaid}
+            hitSlop={6}
+          >
+            <Text style={styles.rfidUid}>{item.tagUid}</Text>
+            {!isPaid && <Ionicons name="create-outline" size={14} color={COLORS.bronze} />}
+          </Pressable>
+        )}
+      </View>
+
+      {/* Hành động */}
+      <View style={styles.cardActions}>
+        {isPaid ? (
+          <>
+            <ScalePress style={[styles.actionBtn, styles.actionAmber]} onPress={onPrimary}>
+              <Ionicons name="arrow-undo-outline" size={16} color={COLORS.amber} />
+              <Text style={[styles.actionText, { color: COLORS.amber }]}>Đặt lại chưa trả</Text>
+            </ScalePress>
+            <ScalePress style={[styles.actionBtn, styles.actionSage]} onPress={onSecondary}>
+              <Ionicons name="walk-outline" size={16} color={COLORS.sage} />
+              <Text style={[styles.actionText, { color: COLORS.sage }]}>Thử qua cổng</Text>
+            </ScalePress>
+          </>
+        ) : (
+          <>
+            <ScalePress style={[styles.actionBtn, styles.actionPrimary]} onPress={onPrimary}>
+              <Ionicons name="card-outline" size={16} color={COLORS.champagne} />
+              <Text style={[styles.actionText, { color: '#FFFFFF' }]}>Thanh toán</Text>
+            </ScalePress>
+            <ScalePress style={[styles.actionBtn, styles.actionRose]} onPress={onSecondary}>
+              <Ionicons name="alert-circle-outline" size={16} color={COLORS.rose} />
+              <Text style={[styles.actionText, { color: COLORS.rose }]}>Thử trộm</Text>
+            </ScalePress>
+          </>
+        )}
+      </View>
+    </View>
+  );
+}
+
+/* =================================================================== */
+/* Styles                                                               */
+/* =================================================================== */
 const styles = StyleSheet.create({
-  safeArea: {
+  root: {
     flex: 1,
-    backgroundColor: '#F3F4F6',
+    backgroundColor: COLORS.bg,
   },
-  header: {
-    paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 12,
-    backgroundColor: '#FFFFFF',
+  scrollContent: {
+    paddingHorizontal: 18,
+    paddingTop: 8,
+  },
+
+  /* Top bar */
+  topBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 18,
+    marginTop: 4,
+  },
+  topBarText: {
+    flex: 1,
+    marginRight: 12,
+  },
+  greeting: {
+    fontSize: 13,
+    color: COLORS.inkSoft,
+    fontWeight: '500',
+  },
+  brand: {
+    fontSize: 28,
+    fontWeight: '800',
+    color: COLORS.ink,
+    letterSpacing: -0.6,
+    marginTop: 2,
+  },
+  dateRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 4,
+  },
+  dateText: {
+    fontSize: 12,
+    color: COLORS.inkMuted,
+    fontWeight: '500',
+  },
+  dotSep: {
+    width: 3,
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: COLORS.lineStrong,
+    marginHorizontal: 4,
+  },
+  iconBtn: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.line,
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...shadow(1),
+  },
+
+  /* Hero */
+  hero: {
+    borderRadius: RADIUS.xl,
+    padding: 20,
+    overflow: 'hidden',
+    ...shadow(3),
+  },
+  heroOrbA: {
+    position: 'absolute',
+    width: 220,
+    height: 220,
+    borderRadius: 110,
+    backgroundColor: COLORS.champagneSoft,
+    top: -110,
+    right: -60,
+  },
+  heroOrbB: {
+    position: 'absolute',
+    width: 140,
+    height: 140,
+    borderRadius: 70,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    bottom: -60,
+    left: -30,
+  },
+  heroTop: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    borderBottomWidth: 1,
-    borderBottomColor: '#E5E7EB',
   },
-  headerTitle: {
-    fontSize: 20,
-    fontWeight: '800',
-    color: '#111827',
-    letterSpacing: 0.5,
-  },
-  headerSubtitle: {
-    fontSize: 12,
-    color: '#6B7280',
-    marginTop: 2,
-  },
-  syncButton: {
-    backgroundColor: '#EEF2FF',
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#C7D2FE',
-  },
-  syncButtonText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#3730A3',
-  },
-  dashboardCard: {
+  heroLabelRow: {
     flexDirection: 'row',
-    backgroundColor: '#FFFFFF',
-    marginHorizontal: 16,
-    marginTop: 12,
-    borderRadius: 14,
-    paddingVertical: 14,
-    paddingHorizontal: 8,
-    shadowColor: '#000',
-    shadowOpacity: 0.05,
-    shadowRadius: 5,
-    elevation: 2,
-  },
-  dashboardItem: {
-    flex: 1,
     alignItems: 'center',
+    gap: 6,
   },
-  dashboardLabel: {
-    fontSize: 11,
-    color: '#6B7280',
-    marginBottom: 4,
-  },
-  dashboardValue: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#1F2937',
-  },
-  dashboardValueOnline: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#059669',
-  },
-  dashboardValueOffline: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#DC2626',
-  },
-  dividerVertical: {
-    width: 1,
-    backgroundColor: '#E5E7EB',
-    height: '80%',
-    alignSelf: 'center',
-  },
-  addBtnContainer: {
-    marginHorizontal: 16,
-    marginTop: 10,
-  },
-  btnAddProduct: {
-    backgroundColor: '#1E40AF',
-    paddingVertical: 11,
-    borderRadius: 10,
-    alignItems: 'center',
-    shadowColor: '#1E40AF',
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  btnAddProductText: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  tabContainer: {
-    flexDirection: 'row',
-    marginHorizontal: 16,
-    marginTop: 10,
-    backgroundColor: '#E5E7EB',
-    borderRadius: 10,
-    padding: 3,
-  },
-  tabButton: {
-    flex: 1,
-    paddingVertical: 9,
-    alignItems: 'center',
-    borderRadius: 8,
-  },
-  tabButtonActiveUnpaid: {
-    backgroundColor: '#FDE8E8',
-    shadowColor: '#000',
-    shadowOpacity: 0.08,
-    shadowRadius: 3,
-    elevation: 2,
-  },
-  tabTextActiveUnpaid: {
-    color: '#9B1C1C',
-    fontWeight: '700',
-  },
-  tabButtonActivePaid: {
-    backgroundColor: '#DEF7EC',
-    shadowColor: '#000',
-    shadowOpacity: 0.08,
-    shadowRadius: 3,
-    elevation: 2,
-  },
-  tabTextActivePaid: {
-    color: '#03543F',
-    fontWeight: '700',
-  },
-  tabButtonActiveSecurity: {
-    backgroundColor: '#FFFFFF',
-    shadowColor: '#000',
-    shadowOpacity: 0.08,
-    shadowRadius: 3,
-    elevation: 2,
-  },
-  tabTextActiveSecurity: {
-    color: '#1D4ED8',
-    fontWeight: '700',
-  },
-  tabText: {
+  heroLabel: {
     fontSize: 12,
+    color: COLORS.champagne,
     fontWeight: '600',
-    color: '#4B5563',
+    letterSpacing: 0.3,
   },
-  scrollContent: {
-    padding: 16,
-    paddingBottom: 40,
-  },
-  sectionHeader: {
-    marginBottom: 12,
-  },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#111827',
-  },
-  sectionSubtitle: {
-    fontSize: 12,
-    color: '#6B7280',
-    marginTop: 2,
-  },
-  productCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 14,
-    padding: 14,
-    marginBottom: 14,
-    shadowColor: '#000',
-    shadowOpacity: 0.04,
-    shadowRadius: 6,
-    elevation: 2,
-    borderWidth: 1,
-  },
-  productCardUnpaid: {
-    borderColor: '#FECACA',
-  },
-  productCardPaid: {
-    borderColor: '#A7F3D0',
-  },
-  productTopRow: {
+  heroStatus: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
+    gap: 7,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: RADIUS.pill,
   },
-  productIcon: {
-    fontSize: 36,
-    marginRight: 12,
-    backgroundColor: '#F3F4F6',
-    padding: 8,
-    borderRadius: 10,
-    overflow: 'hidden',
+  heroStatusText: {
+    fontSize: 11,
+    color: '#F5EFE6',
+    fontWeight: '600',
   },
-  productInfo: {
-    flex: 1,
+  heroAmount: {
+    fontSize: 34,
+    fontWeight: '800',
+    color: '#FFFFFF',
+    letterSpacing: -0.8,
+    marginTop: 14,
   },
-  productName: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#111827',
-  },
-  productCategory: {
+  heroSub: {
     fontSize: 12,
-    color: '#6B7280',
-    marginTop: 2,
-  },
-  productPrice: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#2563EB',
+    color: 'rgba(245,239,230,0.7)',
     marginTop: 4,
   },
-  btnDelete: {
-    padding: 6,
-    backgroundColor: '#FEE2E2',
-    borderRadius: 14,
-    width: 28,
+  heroDivider: {
+    height: 1,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    marginVertical: 16,
+  },
+  heroStats: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  heroStat: {
+    flex: 1,
+    alignItems: 'center',
+    paddingHorizontal: 4,
+  },
+  heroStatValue: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#FFFFFF',
+  },
+  heroStatLabel: {
+    fontSize: 11,
+    color: 'rgba(245,239,230,0.6)',
+    marginTop: 3,
+  },
+  heroStatSep: {
+    width: 1,
     height: 28,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+
+  /* Environment */
+  envRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 14,
+  },
+  envCard: {
+    flex: 1,
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.lg,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: COLORS.line,
+    ...shadow(1),
+  },
+  envHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  envIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  btnDeleteText: {
-    color: '#DC2626',
+  envStatus: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.inkSoft,
+  },
+  envValue: {
+    fontSize: 26,
+    fontWeight: '800',
+    color: COLORS.ink,
+    letterSpacing: -0.5,
+  },
+  envUnit: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.inkMuted,
+  },
+  envLabel: {
+    fontSize: 12,
+    color: COLORS.inkMuted,
+    marginTop: 2,
+    marginBottom: 10,
+  },
+
+  /* Detect banner */
+  detectBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.amberSoft,
+    borderWidth: 1,
+    borderColor: COLORS.amberLine,
+    borderRadius: RADIUS.lg,
+    padding: 12,
+    marginTop: 14,
+  },
+  detectIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 13,
+    backgroundColor: COLORS.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+  },
+  detectText: {
+    flex: 1,
+    marginRight: 10,
+  },
+  detectTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.amber,
+  },
+  detectUid: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: COLORS.ink,
+    fontFamily: MONO,
+    marginTop: 2,
+  },
+  detectBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: COLORS.espresso,
+    paddingHorizontal: 13,
+    paddingVertical: 9,
+    borderRadius: RADIUS.pill,
+  },
+  detectBtnText: {
+    color: '#FFFFFF',
     fontSize: 12,
     fontWeight: '700',
   },
-  rfidBox: {
-    backgroundColor: '#F9FAFB',
-    borderRadius: 8,
-    padding: 8,
-    marginTop: 10,
+
+  /* Search */
+  searchBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.pill,
+    borderWidth: 1,
+    borderColor: COLORS.line,
+    paddingHorizontal: 16,
+    height: 48,
+    marginTop: 16,
+    ...shadow(1),
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 14,
+    color: COLORS.ink,
+    paddingVertical: 0,
+  },
+
+  /* Section */
+  sectionHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 22,
+    marginBottom: 12,
+  },
+  sectionTitle: {
+    fontSize: 19,
+    fontWeight: '800',
+    color: COLORS.ink,
+    letterSpacing: -0.3,
+  },
+  sectionSub: {
+    fontSize: 12,
+    color: COLORS.inkSoft,
+    marginTop: 3,
+  },
+  countChip: {
+    minWidth: 34,
+    height: 30,
+    borderRadius: 15,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  countChipText: {
+    fontSize: 13,
+    fontWeight: '800',
+  },
+
+  /* Pill */
+  pill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: RADIUS.pill,
+  },
+  pillDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  pillText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+
+  /* Product card */
+  card: {
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.xl,
+    padding: 14,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: COLORS.line,
+    ...shadow(2),
+  },
+  cardTop: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  cardIcon: {
+    width: 64,
+    height: 64,
+    borderRadius: 20,
+    backgroundColor: COLORS.sand,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  cardEmoji: {
+    fontSize: 32,
+  },
+  cardInfo: {
+    flex: 1,
+    marginRight: 8,
+  },
+  cardName: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: COLORS.ink,
+    letterSpacing: -0.2,
+  },
+  cardCategory: {
+    fontSize: 12,
+    color: COLORS.inkMuted,
+    marginTop: 2,
+  },
+  cardPriceRow: {
     flexDirection: 'row',
     alignItems: 'center',
     flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 8,
+  },
+  cardPrice: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: COLORS.bronze,
+    letterSpacing: -0.3,
+  },
+  cardDelete: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: COLORS.surfaceWarm,
+    borderWidth: 1,
+    borderColor: COLORS.line,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  /* RFID strip */
+  rfid: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: COLORS.surfaceWarm,
+    borderRadius: RADIUS.md,
+    borderWidth: 1,
+    borderColor: COLORS.line,
+    borderStyle: 'dashed',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginTop: 14,
+    gap: 8,
+  },
+  rfidLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexShrink: 1,
+  },
+  rfidIcon: {
+    width: 26,
+    height: 26,
+    borderRadius: 9,
+    backgroundColor: COLORS.amberSoft,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   rfidLabel: {
     fontSize: 12,
     fontWeight: '600',
-    color: '#4B5563',
-    marginRight: 6,
+    color: COLORS.inkSoft,
+    flexShrink: 1,
   },
-  uidDisplay: {
+  rfidRight: {
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 6,
   },
-  uidText: {
+  rfidUid: {
     fontSize: 13,
     fontWeight: '700',
-    color: '#1F2937',
-    fontFamily: 'monospace',
-    backgroundColor: '#EEF2FF',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
+    color: COLORS.ink,
+    fontFamily: MONO,
+    letterSpacing: 0.5,
   },
-  editHint: {
-    fontSize: 11,
-    color: '#3B82F6',
-    fontStyle: 'italic',
-  },
-  editUidRow: {
+  rfidEdit: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 4,
+    gap: 6,
     flex: 1,
+    maxWidth: 210,
   },
-  uidInput: {
+  rfidInput: {
     flex: 1,
-    backgroundColor: '#FFFFFF',
+    height: 34,
+    backgroundColor: COLORS.surface,
     borderWidth: 1,
-    borderColor: '#3B82F6',
-    borderRadius: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    fontSize: 12,
-    fontFamily: 'monospace',
-  },
-  saveUidBtn: {
-    backgroundColor: '#3B82F6',
+    borderColor: COLORS.bronze,
+    borderRadius: 10,
     paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 6,
-    marginLeft: 6,
-  },
-  saveUidText: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  actionRow: {
-    flexDirection: 'row',
-    marginTop: 12,
-    gap: 8,
-  },
-  btnPayMain: {
-    flex: 2,
-    backgroundColor: '#10B981',
-    paddingVertical: 10,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  btnPayMainText: {
-    color: '#FFFFFF',
     fontSize: 13,
-    fontWeight: '700',
+    fontFamily: MONO,
+    color: COLORS.ink,
+    paddingVertical: 0,
   },
-  btnRefundMain: {
-    flex: 2,
-    backgroundColor: '#F59E0B',
-    paddingVertical: 10,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  btnRefundMainText: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  btnSimulateAlert: {
-    flex: 1,
-    backgroundColor: '#EF4444',
-    paddingVertical: 10,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  btnSimulatePass: {
-    flex: 1,
-    backgroundColor: '#6B7280',
-    paddingVertical: 10,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  btnSimulateText: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  emptyContainer: {
-    padding: 30,
-    alignItems: 'center',
-    backgroundColor: '#FFFFFF',
-    borderRadius: 14,
-    marginTop: 10,
-  },
-  emptyIcon: {
-    fontSize: 48,
-    marginBottom: 8,
-  },
-  emptyTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#1F2937',
-    marginBottom: 4,
-  },
-  emptyDesc: {
-    fontSize: 12,
-    color: '#6B7280',
-    textAlign: 'center',
-    lineHeight: 18,
-  },
-  gateStatusBox: {
-    backgroundColor: '#FFFFFF',
-    padding: 14,
-    borderRadius: 12,
-    borderLeftWidth: 4,
-    borderLeftColor: '#3B82F6',
-  },
-  gateStatusTitle: {
-    fontSize: 12,
-    color: '#6B7280',
-    marginBottom: 2,
-  },
-  gateStatusMsg: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#1F2937',
-  },
-  gateStatusUid: {
-    fontSize: 12,
-    fontFamily: 'monospace',
-    color: '#4B5563',
-    marginTop: 4,
-  },
-  logCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 10,
-    borderLeftWidth: 5,
-  },
-  logPass: {
-    borderLeftColor: '#10B981',
-  },
-  logAlert: {
-    borderLeftColor: '#EF4444',
-  },
-  logHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 4,
-  },
-  logStatus: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: '#111827',
-  },
-  logTime: {
-    fontSize: 11,
-    color: '#6B7280',
-  },
-  logProduct: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#1F2937',
-    marginTop: 2,
-  },
-  logUid: {
-    fontSize: 11,
-    color: '#4B5563',
-    fontFamily: 'monospace',
-    marginTop: 1,
-  },
-  logMsg: {
-    fontSize: 12,
-    color: '#374151',
-    marginTop: 3,
-    fontStyle: 'italic',
-  },
-  clearLogsBtn: {
-    backgroundColor: '#E5E7EB',
-    paddingVertical: 10,
-    borderRadius: 8,
-    alignItems: 'center',
-    marginTop: 10,
-  },
-  clearLogsText: {
-    fontSize: 13,
-    color: '#4B5563',
-    fontWeight: '600',
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'flex-end',
-  },
-  modalContent: {
-    backgroundColor: '#FFFFFF',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 20,
-    maxHeight: '85%',
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#E5E7EB',
-    paddingBottom: 10,
-  },
-  modalTitle: {
-    fontSize: 17,
-    fontWeight: '800',
-    color: '#111827',
-  },
-  modalCloseText: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#9CA3AF',
-    padding: 4,
-  },
-  inputLabel: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#374151',
-    marginTop: 10,
-    marginBottom: 4,
-  },
-  formInput: {
-    backgroundColor: '#F9FAFB',
-    borderWidth: 1,
-    borderColor: '#D1D5DB',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    fontSize: 14,
-    color: '#111827',
-  },
-  uidFormInput: {
-    fontFamily: 'monospace',
-    fontWeight: '700',
-    color: '#1E40AF',
-  },
-  uidHelpText: {
-    fontSize: 11,
-    color: '#2563EB',
-    marginTop: 4,
-    fontStyle: 'italic',
-  },
-  iconRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginBottom: 4,
-  },
-  iconChoice: {
-    backgroundColor: '#F3F4F6',
-    padding: 8,
+  rfidSave: {
+    width: 34,
+    height: 34,
     borderRadius: 10,
-    borderWidth: 2,
-    borderColor: 'transparent',
+    backgroundColor: COLORS.espresso,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  iconChoiceSelected: {
-    borderColor: '#2563EB',
-    backgroundColor: '#EFF6FF',
-  },
-  iconChoiceText: {
-    fontSize: 22,
-  },
-  modalBtnRow: {
-    flexDirection: 'row',
-    gap: 12,
-    marginTop: 20,
-    marginBottom: 10,
-  },
-  btnCancel: {
-    flex: 1,
-    backgroundColor: '#E5E7EB',
-    paddingVertical: 12,
+  rfidCancel: {
+    width: 34,
+    height: 34,
     borderRadius: 10,
+    backgroundColor: COLORS.sand,
     alignItems: 'center',
+    justifyContent: 'center',
   },
-  btnCancelText: {
-    color: '#4B5563',
-    fontWeight: '700',
-    fontSize: 14,
-  },
-  btnConfirmAdd: {
-    flex: 2,
-    backgroundColor: '#2563EB',
-    paddingVertical: 12,
-    borderRadius: 10,
-    alignItems: 'center',
-  },
-  btnConfirmAddText: {
-    color: '#FFFFFF',
-    fontWeight: '700',
-    fontSize: 14,
-  },
-  autoDetectBanner: {
-    backgroundColor: '#EFF6FF',
-    marginHorizontal: 16,
-    marginTop: 10,
-    padding: 12,
-    borderRadius: 12,
-    borderWidth: 1.5,
-    borderColor: '#3B82F6',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    shadowColor: '#2563EB',
-    shadowOpacity: 0.15,
-    shadowRadius: 5,
-    elevation: 3,
-  },
-  autoDetectTitle: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#1E40AF',
-  },
-  autoDetectUid: {
-    fontSize: 14,
-    fontWeight: '800',
-    color: '#1D4ED8',
-    fontFamily: 'monospace',
-    marginTop: 2,
-  },
-  autoDetectBtn: {
-    backgroundColor: '#2563EB',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-  },
-  autoDetectBtnText: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  btnQuickFill: {
-    backgroundColor: '#EEF2FF',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#C7D2FE',
-  },
-  btnQuickFillText: {
-    fontSize: 11,
-    color: '#3730A3',
-    fontWeight: '700',
-  },
-  mqttControlCard: {
-    backgroundColor: '#0F172A',
-    borderRadius: 14,
-    padding: 16,
-    marginTop: 12,
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  mqttHeaderRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 4,
-  },
-  mqttTitle: {
-    color: '#F8FAFC',
-    fontSize: 15,
-    fontWeight: '800',
-  },
-  mqttSubtitle: {
-    color: '#94A3B8',
-    fontSize: 11,
-    marginBottom: 12,
-  },
-  mqttBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
-  },
-  mqttBadgeOnline: {
-    backgroundColor: '#065F46',
-  },
-  mqttBadgeOffline: {
-    backgroundColor: '#374151',
-  },
-  mqttBadgeText: {
-    color: '#34D399',
-    fontSize: 10,
-    fontWeight: '800',
-  },
-  mqttBtnRow: {
+
+  /* Card actions */
+  cardActions: {
     flexDirection: 'row',
     gap: 10,
+    marginTop: 12,
+  },
+  actionBtn: {
+    flex: 1,
+    height: 46,
+    borderRadius: RADIUS.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+  },
+  actionPrimary: {
+    flex: 1.3,
+    backgroundColor: COLORS.espresso,
+  },
+  actionRose: {
+    backgroundColor: COLORS.roseSoft,
+    borderWidth: 1,
+    borderColor: COLORS.roseLine,
+  },
+  actionAmber: {
+    flex: 1.3,
+    backgroundColor: COLORS.amberSoft,
+    borderWidth: 1,
+    borderColor: COLORS.amberLine,
+  },
+  actionSage: {
+    backgroundColor: COLORS.sageSoft,
+    borderWidth: 1,
+    borderColor: COLORS.sageLine,
+  },
+  actionText: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
+
+  /* Gate card */
+  gateCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.xl,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: COLORS.line,
+    ...shadow(2),
+  },
+  gateIconRing: {
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    borderWidth: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 14,
+  },
+  gateIcon: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  gateInfo: {
+    flex: 1,
+  },
+  gateMsg: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: COLORS.ink,
+    marginTop: 6,
+    lineHeight: 20,
+  },
+  gateMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 6,
+  },
+  gateUid: {
+    fontSize: 12,
+    fontFamily: MONO,
+    fontWeight: '700',
+    color: COLORS.inkSoft,
+  },
+  gateTime: {
+    fontSize: 11,
+    color: COLORS.inkMuted,
+    flexShrink: 1,
+  },
+
+  /* MQTT */
+  mqttCard: {
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.xl,
+    padding: 16,
+    marginTop: 14,
+    borderWidth: 1,
+    borderColor: COLORS.line,
+    ...shadow(2),
+  },
+  mqttHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 14,
+  },
+  mqttHeadIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    backgroundColor: COLORS.amberSoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  mqttTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: COLORS.ink,
+  },
+  mqttSub: {
+    fontSize: 11,
+    color: COLORS.inkMuted,
+    marginTop: 2,
+  },
+  mqttBtns: {
+    flexDirection: 'row',
+    gap: 12,
   },
   mqttBtn: {
     flex: 1,
-    paddingVertical: 12,
-    borderRadius: 10,
+    borderRadius: RADIUS.lg,
+    paddingVertical: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  mqttBtnOpen: {
+    backgroundColor: COLORS.sage,
+  },
+  mqttBtnClose: {
+    backgroundColor: COLORS.espresso,
+  },
+  mqttBtnIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.14)',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  mqttBtnOpen: {
-    backgroundColor: '#10B981',
-  },
-  mqttBtnClose: {
-    backgroundColor: '#EF4444',
-  },
   mqttBtnText: {
     color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+
+  /* Logs timeline */
+  logHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 24,
+    marginBottom: 12,
+  },
+  clearBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.line,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: RADIUS.pill,
+  },
+  clearBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.inkSoft,
+  },
+  tlRow: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  tlRail: {
+    width: 22,
+    alignItems: 'center',
+  },
+  tlDot: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 14,
+    borderWidth: 3,
+    borderColor: COLORS.bg,
+  },
+  tlLine: {
+    flex: 1,
+    width: 2,
+    backgroundColor: COLORS.lineStrong,
+    marginTop: 2,
+    borderRadius: 1,
+  },
+  tlCard: {
+    flex: 1,
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.lg,
+    padding: 13,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: COLORS.line,
+  },
+  tlTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 8,
+  },
+  tlStatus: {
+    fontSize: 12,
     fontWeight: '800',
+  },
+  tlTime: {
+    fontSize: 11,
+    color: COLORS.inkMuted,
+    flexShrink: 1,
+  },
+  tlProduct: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: COLORS.ink,
+    marginTop: 4,
+  },
+  tlMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 3,
+  },
+  tlUid: {
+    fontSize: 11,
+    fontFamily: MONO,
+    color: COLORS.inkSoft,
+  },
+  tlMsg: {
+    fontSize: 12,
+    color: COLORS.inkSoft,
+    marginTop: 6,
+    lineHeight: 17,
+  },
+  moreLogs: {
+    textAlign: 'center',
+    fontSize: 12,
+    color: COLORS.inkMuted,
+    marginTop: 4,
+  },
+
+  /* Bottom nav */
+  navWrap: {
+    position: 'absolute',
+    left: 16,
+    right: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  navBar: {
+    flex: 1,
+    height: NAV_HEIGHT,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.97)',
+    borderRadius: NAV_HEIGHT / 2,
+    paddingHorizontal: 7,
+    borderWidth: 1,
+    borderColor: COLORS.line,
+    ...shadow(3),
+  },
+  navItem: {
+    flex: 1,
+    height: 50,
+    borderRadius: 25,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  navItemActive: {
+    flex: 1.9,
+    backgroundColor: COLORS.espresso,
+  },
+  navLabelActive: {
+    color: '#FFFFFF',
     fontSize: 13,
+    fontWeight: '700',
+  },
+  navBadge: {
+    position: 'absolute',
+    top: 7,
+    right: '22%',
+    minWidth: 17,
+    height: 17,
+    borderRadius: 9,
+    paddingHorizontal: 4,
+    backgroundColor: COLORS.bronze,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: COLORS.surface,
+  },
+  navBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 9,
+    fontWeight: '800',
+  },
+  fab: {
+    width: NAV_HEIGHT,
+    height: NAV_HEIGHT,
+    borderRadius: NAV_HEIGHT / 2,
+    ...shadow(3),
+  },
+  fabInner: {
+    flex: 1,
+    borderRadius: NAV_HEIGHT / 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(226,200,147,0.25)',
+  },
+
+  /* Bottom sheet */
+  sheetOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(31, 26, 22, 0.45)',
+    justifyContent: 'flex-end',
+  },
+  sheet: {
+    backgroundColor: COLORS.bg,
+    borderTopLeftRadius: 30,
+    borderTopRightRadius: 30,
+    paddingHorizontal: 20,
+    paddingTop: 10,
+    maxHeight: '92%',
+  },
+  sheetHandle: {
+    width: 42,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: COLORS.lineStrong,
+    alignSelf: 'center',
+    marginBottom: 14,
+  },
+  sheetHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 14,
+  },
+  sheetTitle: {
+    fontSize: 21,
+    fontWeight: '800',
+    color: COLORS.ink,
+    letterSpacing: -0.4,
+  },
+  sheetSub: {
+    fontSize: 12,
+    color: COLORS.inkSoft,
+    marginTop: 3,
+  },
+  sheetClose: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.line,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  previewCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.lg,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: COLORS.line,
+    ...shadow(1),
+  },
+  previewIcon: {
+    width: 54,
+    height: 54,
+    borderRadius: 17,
+    backgroundColor: COLORS.sand,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  previewName: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: COLORS.ink,
+  },
+  previewPrice: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: COLORS.bronze,
+    marginTop: 3,
+  },
+  previewUid: {
+    backgroundColor: COLORS.surfaceWarm,
+    borderWidth: 1,
+    borderColor: COLORS.line,
+    borderStyle: 'dashed',
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    maxWidth: 110,
+  },
+  previewUidText: {
+    fontSize: 11,
+    fontFamily: MONO,
+    fontWeight: '700',
+    color: COLORS.inkSoft,
+  },
+  fieldLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.inkSoft,
+    marginTop: 16,
+    marginBottom: 8,
+    letterSpacing: 0.2,
+  },
+  fieldLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 16,
+    marginBottom: 8,
+  },
+  field: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.line,
+    borderRadius: RADIUS.md,
+    paddingHorizontal: 14,
+    height: 50,
+  },
+  fieldInput: {
+    flex: 1,
+    fontSize: 15,
+    color: COLORS.ink,
+    paddingVertical: 0,
+  },
+  fieldMono: {
+    fontFamily: MONO,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+    color: COLORS.bronze,
+  },
+  fieldSuffix: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.inkMuted,
+  },
+  fieldHint: {
+    fontSize: 11,
+    color: COLORS.inkMuted,
+    marginTop: 6,
+  },
+  quickFill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: COLORS.amberSoft,
+    borderWidth: 1,
+    borderColor: COLORS.amberLine,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: RADIUS.pill,
+  },
+  quickFillText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: COLORS.amber,
+    fontFamily: MONO,
+  },
+  iconGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  iconChoice: {
+    width: '22.6%',
+    aspectRatio: 1,
+    borderRadius: RADIUS.md,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1.5,
+    borderColor: COLORS.line,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  iconChoiceSelected: {
+    borderColor: COLORS.espresso,
+    backgroundColor: COLORS.sand,
+  },
+  iconChoiceText: {
+    fontSize: 26,
+  },
+  iconCheck: {
+    position: 'absolute',
+    top: 5,
+    right: 5,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: COLORS.espresso,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sheetBtns: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 24,
+    marginBottom: 4,
+  },
+  btnGhost: {
+    flex: 1,
+    height: 52,
+    borderRadius: RADIUS.md,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.line,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  btnGhostText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: COLORS.inkSoft,
+  },
+  btnPrimaryWrap: {
+    flex: 2,
+    height: 52,
+    borderRadius: RADIUS.md,
+    ...shadow(2),
+  },
+  btnPrimary: {
+    flex: 1,
+    borderRadius: RADIUS.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  btnPrimaryText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#FFFFFF',
   },
 });
