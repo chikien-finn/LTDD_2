@@ -27,7 +27,7 @@ type ScalePressProps = Omit<PressableProps, 'style' | 'children'> & {
 
 export function ScalePress({
   style,
-  scaleTo = 0.97,
+  scaleTo = 0.98,
   children,
   onPressIn,
   onPressOut,
@@ -37,11 +37,10 @@ export function ScalePress({
   const scale = useRef(new Animated.Value(1)).current;
 
   const animateTo = (value: number) =>
-    Animated.spring(scale, {
+    Animated.timing(scale, {
       toValue: value,
+      duration: 100,
       useNativeDriver: true,
-      speed: 40,
-      bounciness: 5,
     }).start();
 
   return (
@@ -64,21 +63,21 @@ export function ScalePress({
 }
 
 /* ------------------------------------------------------------------ */
-/* PulseDot – chấm trạng thái phát sóng (live)                         */
+/* PulseDot – chấm trạng thái kết nối nhẹ nhàng                       */
 /* ------------------------------------------------------------------ */
 export function PulseDot({ color, size = 8 }: { color: string; size?: number }) {
   const pulse = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     const loop = Animated.loop(
-      Animated.timing(pulse, { toValue: 1, duration: 1600, useNativeDriver: true })
+      Animated.timing(pulse, { toValue: 1, duration: 2000, useNativeDriver: true })
     );
     loop.start();
     return () => loop.stop();
   }, [pulse]);
 
-  const scale = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 2.8] });
-  const opacity = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.55, 0] });
+  const scale = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.8] });
+  const opacity = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.35, 0] });
 
   return (
     <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
@@ -161,7 +160,7 @@ export function Toast({
   useEffect(() => {
     if (!toast) return;
     anim.setValue(0);
-    Animated.spring(anim, { toValue: 1, useNativeDriver: true, speed: 16, bounciness: 7 }).start();
+    Animated.spring(anim, { toValue: 1, useNativeDriver: true, speed: 20, bounciness: 0 }).start();
     const timer = setTimeout(() => {
       Animated.timing(anim, { toValue: 0, duration: 220, useNativeDriver: true }).start(
         ({ finished }) => {

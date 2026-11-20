@@ -28,6 +28,7 @@
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 #include "time.h"
+#include <ESPmDNS.h>
 
 // ---------------------- 1. CAU HINH WIFI & FIREBASE ----------------------
 const char* ssid     = "Omgprice";  // Ten WiFi cua ban
@@ -35,8 +36,9 @@ const char* password = "kienpro2";  // Mat khau WiFi cua ban
 
 const char* FIREBASE_HOST = "https://cuahangthongminhesp32-default-rtdb.asia-southeast1.firebasedatabase.app";
 
-// ---------------------- 2. CAU HINH MQTT (CHO MQTTX & APP) ----------------
-const char* mqtt_server = "10.95.112.35";
+// ---------------------- 2. CAU HINH MQTT & mDNS ---------------------------
+// Hostname máy tính chạy MQTT Broker / Backend (mDNS)
+const char* pc_hostname = "DESKTOP-PQFP4UP"; 
 const int   mqtt_port   = 1883;
 
 // Các Topic dành cho MQTTX (Trong MQTTX bạn subscribe topic: cua_hang_IOT/#)
@@ -47,6 +49,10 @@ const char* topic_command = "cua_hang_IOT/gate/command";
 
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
+
+IPAddress mqtt_server_ip;
+bool isMqttServerResolved = false;
+unsigned long lastMdnsRetry = 0;
 
 // ---------------------- 3. CAU HINH PHAN CUNG ---------------------------
 #define SS_PIN    5
@@ -96,6 +102,7 @@ void sendRfidToMqtt(String uid, String prodName, String status, String note);
 void sendLogToFirebase(String productName, String uid, String status, String message);
 void updateGateStatus(String status, String msg, String uid);
 void connectToWiFi();
+bool resolveMqttServer();
 void connectMQTT();
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 void rotateServoSmooth(int targetAngle);
@@ -158,12 +165,11 @@ void setup() {
   gateServo.detach(); // Ngắt xung giữ ngay để chống sụt nguồn gây Brownout!
   Serial.println("[TEST 5/6] Servo Barrier: SAN SANG (GPIO 25)");
 
-  // 6. Cấu hình MQTT cho MQTTX
-  mqttClient.setServer(mqtt_server, mqtt_port);
+  // 6. Cấu hình MQTT cho MQTTX (server IP se duoc mDNS gan sau khi ket noi WiFi)
   mqttClient.setCallback(mqttCallback);
   mqttClient.setBufferSize(512);
 
-  // 7. Kết nối WiFi
+  // 7. Kết nối WiFi & Khoi dong mDNS de do tim IP Broker
   connectToWiFi();
 
   delay(1500);
@@ -249,18 +255,48 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 }
 
 // ==============================================================================
+// DÒ TÌM IP MÁY TÍNH CHẠY BROKER QUA mDNS
+// ==============================================================================
+bool resolveMqttServer() {
+  Serial.printf("[mDNS] Dang do tim IP may tinh '%s' trong mang LAN...\n", pc_hostname);
+  
+  IPAddress resolvedIP = MDNS.queryHost(pc_hostname, 2000);
+  if (resolvedIP != IPAddress(0, 0, 0, 0) && resolvedIP.toString() != "0.0.0.0") {
+    mqtt_server_ip = resolvedIP;
+    isMqttServerResolved = true;
+    mqttClient.setServer(mqtt_server_ip, mqtt_port);
+    Serial.printf(" >>> [mDNS] DA TIM THAY MAY TINH! IP: %s\n", mqtt_server_ip.toString().c_str());
+    return true;
+  }
+  
+  Serial.println(" >>> [mDNS] Chua tim thay IP may tinh qua mDNS, se thu lai...");
+  return false;
+}
+
+// ==============================================================================
 // KẾT NỐI MQTT BROKER (Non-blocking: khong bao gio gay dung he thong)
 // ==============================================================================
 void connectMQTT() {
   if (WiFi.status() != WL_CONNECTED) return;
+
+  // Neu chua phan giai duoc IP may tinh qua mDNS, thu lai sau moi 5 giay
+  if (!isMqttServerResolved) {
+    if (millis() - lastMdnsRetry > 5000) {
+      lastMdnsRetry = millis();
+      resolveMqttServer();
+    }
+    if (!isMqttServerResolved) return;
+  }
+
   if (mqttClient.connected()) return;
 
   if (millis() - lastMqttRetry > 5000) {
     lastMqttRetry = millis();
     String clientId = "ESP32-SmartStore-" + String(random(0xffff), HEX);
-    Serial.printf("[MQTT] Dang ket noi HiveMQ Broker (Client: %s)...\n", clientId.c_str());
+    Serial.printf("[MQTT] Dang ket noi Broker %s:%d (Client: %s)...\n", 
+                  mqtt_server_ip.toString().c_str(), mqtt_port, clientId.c_str());
 
-    if (mqttClient.connect(clientId.c_str())) {
+    if (mqttClient.connect(clientId.c_str(), "esp32", "esp32pass")) {
       Serial.println(" >>> KET NOI MQTTX BROKER: THANH CONG!");
       mqttClient.subscribe(topic_command); // Lắng nghe lệnh từ MQTTX
       mqttClient.publish(topic_gate, "ESP32_ONLINE");
@@ -287,14 +323,34 @@ void connectToWiFi() {
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("\n >>> WIFI: DA KET NOI THANH CONG!");
-    Serial.printf(" >>> IP: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf(" >>> IP ESP32: %s\n", WiFi.localIP().toString().c_str());
 
-    // Dong bo gio NTP Viet Nam (GMT+7)
+    // 1. Khoi dong mDNS responder cho ESP32
+    if (MDNS.begin("esp32-cuahang")) {
+      Serial.println(" >>> [mDNS] Responder san sang: esp32-cuahang.local");
+    } else {
+      Serial.println(" >>> [mDNS] LOI khoi dong MDNS responder!");
+    }
+
+    // 2. Dong bo gio NTP Viet Nam (GMT+7)
     configTime(7 * 3600, 0, "pool.ntp.org", "time.google.com");
 
-    connectMQTT();
+    // 3. Do tim IP may tinh qua mDNS voi co che retry
+    int mdnsRetry = 0;
+    while (!resolveMqttServer() && mdnsRetry < 5) {
+      mdnsRetry++;
+      Serial.printf("[mDNS] Thu lai lan %d/5 sau 1 giay...\n", mdnsRetry);
+      delay(1000);
+    }
 
-    showOledMessage("SMART STORE", "WiFi: OK!", "MQTT: OK!", "SAN SANG");
+    if (isMqttServerResolved) {
+      connectMQTT();
+      showOledMessage("SMART STORE", "WiFi: OK!", "MQTT: OK!", "SAN SANG");
+    } else {
+      Serial.println("[mDNS] Canh bao: Chua tim thay IP may tinh, he thong se tu retry trong nen.");
+      showOledMessage("SMART STORE", "WiFi: OK!", "mDNS: DANG TIM", "Xin cho...");
+    }
+
     soundBuzzerPass();
     updateGateStatus("ONLINE", "Cong an ninh san sang", "");
   } else {
@@ -320,6 +376,7 @@ String getFormattedTime() {
 void loop() {
   // Tu dong noi lai WiFi neu mat ket noi
   if (WiFi.status() != WL_CONNECTED) {
+    isMqttServerResolved = false; // Reset de resolve lai IP may tinh khi co mang moi
     if (millis() - lastWifiRetry > 10000) {
       lastWifiRetry = millis();
       WiFi.disconnect();

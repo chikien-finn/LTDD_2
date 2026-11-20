@@ -50,9 +50,32 @@ import {
   IconName,
 } from './src/ui/components';
 
-type TabType = 'unpaid' | 'paid' | 'security';
+type TabType = 'unpaid' | 'paid' | 'security' | 'revenue';
 
-const ICONS = ['👕', '👖', '🧥', '👗', '👟', '🧢', '🎒', '🕶️'];
+export const CATEGORY_OPTIONS: { key: string; icon: IconName; label: string }[] = [
+  { key: 'áo', icon: 'shirt-outline', label: 'Áo' },
+  { key: 'quần', icon: 'bag-handle-outline', label: 'Quần' },
+  { key: 'khoác', icon: 'shirt-outline', label: 'Khoác' },
+  { key: 'váy', icon: 'pricetag-outline', label: 'Váy' },
+  { key: 'giày', icon: 'footsteps-outline', label: 'Giày' },
+  { key: 'nón', icon: 'baseball-outline', label: 'Nón' },
+  { key: 'balo', icon: 'briefcase-outline', label: 'Balo' },
+  { key: 'kính', icon: 'glasses-outline', label: 'Kính' },
+];
+
+export const getCategoryIcon = (iconOrCat: string): IconName => {
+  const s = (iconOrCat || '').toLowerCase();
+  if (s.includes('áo') || s.includes('shirt') || s.includes('👕')) return 'shirt-outline';
+  if (s.includes('quần') || s.includes('jean') || s.includes('pants') || s.includes('👖')) return 'bag-handle-outline';
+  if (s.includes('khoác') || s.includes('jacket') || s.includes('🧥')) return 'shirt-outline';
+  if (s.includes('váy') || s.includes('đầm') || s.includes('dress') || s.includes('👗')) return 'pricetag-outline';
+  if (s.includes('giày') || s.includes('dép') || s.includes('shoes') || s.includes('👟')) return 'footsteps-outline';
+  if (s.includes('nón') || s.includes('mũ') || s.includes('hat') || s.includes('🧢')) return 'baseball-outline';
+  if (s.includes('balo') || s.includes('cặp') || s.includes('bag') || s.includes('🎒')) return 'briefcase-outline';
+  if (s.includes('kính') || s.includes('glasses') || s.includes('🕶️')) return 'glasses-outline';
+  return 'pricetag-outline';
+};
+
 const MAX_LOGS_SHOWN = 50;
 const NAV_HEIGHT = 64;
 
@@ -77,15 +100,7 @@ const haptic = {
 };
 
 const animateLayout = () =>
-  LayoutAnimation.configureNext(LayoutAnimation.create(240, 'easeInEaseOut', 'opacity'));
-
-const getGreeting = () => {
-  const h = new Date().getHours();
-  if (h < 11) return 'Chào buổi sáng';
-  if (h < 14) return 'Chào buổi trưa';
-  if (h < 18) return 'Chào buổi chiều';
-  return 'Chào buổi tối';
-};
+  LayoutAnimation.configureNext(LayoutAnimation.create(200, 'easeInEaseOut', 'opacity'));
 
 const getDateLabel = () => {
   const d = new Date();
@@ -141,6 +156,21 @@ function SmartStoreScreen() {
   const [newUid, setNewUid] = useState<string>('');
   const [newTagLabel, setNewTagLabel] = useState<string>('Móc khóa #3');
   const [newIcon, setNewIcon] = useState<string>('👕');
+
+  // Popup cảnh báo trộm / vi phạm an ninh
+  const [theftAlert, setTheftAlert] = useState<{
+    visible: boolean;
+    productName: string;
+    tagUid: string;
+    time: string;
+    price?: number;
+    productId?: string;
+  } | null>(null);
+
+  const productsRef = useRef(products);
+  useEffect(() => {
+    productsRef.current = products;
+  }, [products]);
 
   // Toast
   const [toast, setToast] = useState<ToastData | null>(null);
@@ -208,11 +238,12 @@ function SmartStoreScreen() {
           data.time ||
           `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')} ${now.getDate().toString().padStart(2, '0')}/${(now.getMonth() + 1).toString().padStart(2, '0')}/${now.getFullYear()}`;
 
+        const isPaid = data.status === 'PAID';
         setGate((prev) => ({
           ...prev,
           lastSeen: timeFormatted,
           lastScannedUid: data.uid,
-          lastScannedStatus: data.status === 'PAID' ? 'PASS' : 'ALERT',
+          lastScannedStatus: isPaid ? 'PASS' : 'ALERT',
           lastMessage: `${data.product}: ${data.note || data.status}`,
         }));
 
@@ -221,10 +252,10 @@ function SmartStoreScreen() {
           time: timeFormatted,
           productName: data.product,
           tagUid: data.uid,
-          status: data.status === 'PAID' ? 'PASS' : 'ALERT',
+          status: isPaid ? 'PASS' : 'ALERT',
           message:
             data.note ||
-            (data.status === 'PAID'
+            (isPaid
               ? 'Đã thanh toán - Cho phép qua'
               : 'CẢNH BÁO: Chưa thanh toán!'),
         };
@@ -232,6 +263,22 @@ function SmartStoreScreen() {
           newLogEntry,
           ...prev.filter((l) => l.tagUid !== data.uid || l.time !== timeFormatted),
         ]);
+
+        // Nếu sản phẩm chưa thanh toán -> Kích hoạt rung và bật popup cảnh báo màu đỏ
+        if (!isPaid) {
+          haptic.error();
+          const matched = productsRef.current.find(
+            (p) => p.tagUid.toUpperCase() === (data.uid || '').toUpperCase()
+          );
+          setTheftAlert({
+            visible: true,
+            productName: data.product || matched?.name || 'Sản phẩm chưa rõ',
+            tagUid: data.uid,
+            time: timeFormatted,
+            price: matched?.price,
+            productId: matched?.id,
+          });
+        }
       },
       onGate: (status) => {
         setGate((prev) => ({
@@ -421,8 +468,32 @@ function SmartStoreScreen() {
     } else {
       haptic.error();
       showToast('error', 'Cảnh báo báo động!', `${product.name} chưa thanh toán • Còi Buzzer hú`);
+      setTheftAlert({
+        visible: true,
+        productName: product.name,
+        tagUid: product.tagUid,
+        time: timeStr,
+        price: product.price,
+        productId: product.id,
+      });
     }
     await pushSecurityLog(logEntry);
+  };
+
+  // Thanh toán nhanh từ Popup cảnh báo vi phạm
+  const handleTheftPayNow = async () => {
+    if (!theftAlert) return;
+    const prod = products.find(
+      (p) =>
+        p.id === theftAlert.productId ||
+        p.tagUid.toUpperCase() === (theftAlert.tagUid || '').toUpperCase()
+    );
+    setTheftAlert(null);
+    if (prod) {
+      await handlePayProduct(prod);
+    } else {
+      showToast('info', 'Đã đóng cảnh báo');
+    }
   };
 
   const sendGate = (cmd: 'OPEN' | 'CLOSE') => {
@@ -456,6 +527,7 @@ function SmartStoreScreen() {
     { key: 'unpaid', label: 'Chưa trả', icon: 'cart-outline', iconActive: 'cart', count: unpaidProducts.length },
     { key: 'paid', label: 'Đã trả', icon: 'bag-check-outline', iconActive: 'bag-check', count: paidProducts.length },
     { key: 'security', label: 'An ninh', icon: 'shield-outline', iconActive: 'shield-checkmark', count: alertCount },
+    { key: 'revenue', label: 'Doanh thu', icon: 'bar-chart-outline', iconActive: 'bar-chart', count: 0 },
   ];
 
   const navBottom = Math.max(insets.bottom, 14) + 2;
@@ -472,7 +544,7 @@ function SmartStoreScreen() {
         {/* ---------------- Top bar ---------------- */}
         <View style={styles.topBar}>
           <View style={styles.topBarText}>
-            <Text style={styles.greeting}>{getGreeting()} 👋</Text>
+            <Text style={styles.greeting}>Hệ thống bán lẻ & an ninh RFID</Text>
             <Text style={styles.brand}>Smart Store</Text>
             <View style={styles.dateRow}>
               <Ionicons name="calendar-clear-outline" size={12} color={COLORS.inkMuted} />
@@ -499,99 +571,11 @@ function SmartStoreScreen() {
           </ScalePress>
         </View>
 
-        {/* ---------------- Hero card ---------------- */}
-        <LinearGradient
-          colors={[COLORS.mocha, COLORS.espresso]}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={styles.hero}
-        >
-          <View style={styles.heroOrbA} />
-          <View style={styles.heroOrbB} />
-
-          <View style={styles.heroTop}>
-            <View style={styles.heroLabelRow}>
-              <Ionicons name="trending-up" size={14} color={COLORS.champagne} />
-              <Text style={styles.heroLabel}>Doanh thu đã thanh toán</Text>
-            </View>
-            <View style={styles.heroStatus}>
-              <PulseDot color={isGateOnline ? '#7FD3A4' : '#F08A7E'} size={7} />
-              <Text style={styles.heroStatusText}>
-                {isGateOnline ? 'ESP32 Online' : 'ESP32 Offline'}
-              </Text>
-            </View>
-          </View>
-
-          <Text style={styles.heroAmount} numberOfLines={1} adjustsFontSizeToFit>
-            {formatCurrency(paidTotal)}
-          </Text>
-          <Text style={styles.heroSub}>
-            {paidProducts.length} món đã thanh toán •{' '}
-            {isMqttConnected ? 'MQTT đã kết nối' : 'Đồng bộ qua Firebase'}
-          </Text>
-
-          <View style={styles.heroDivider} />
-
-          <View style={styles.heroStats}>
-            <View style={styles.heroStat}>
-              <Text style={styles.heroStatValue} numberOfLines={1} adjustsFontSizeToFit>
-                {formatCurrency(unpaidTotal)}
-              </Text>
-              <Text style={styles.heroStatLabel}>Chờ thanh toán</Text>
-            </View>
-            <View style={styles.heroStatSep} />
-            <View style={styles.heroStat}>
-              <Text style={styles.heroStatValue}>{products.length}</Text>
-              <Text style={styles.heroStatLabel}>Sản phẩm</Text>
-            </View>
-            <View style={styles.heroStatSep} />
-            <View style={styles.heroStat}>
-              <Text style={[styles.heroStatValue, alertCount > 0 && { color: '#F3A497' }]}>
-                {alertCount}
-              </Text>
-              <Text style={styles.heroStatLabel}>Cảnh báo</Text>
-            </View>
-          </View>
-        </LinearGradient>
-
-        {/* ---------------- Môi trường ---------------- */}
-        <View style={styles.envRow}>
-          <View style={styles.envCard}>
-            <View style={styles.envHead}>
-              <View style={[styles.envIcon, { backgroundColor: COLORS.amberSoft }]}>
-                <Ionicons name="thermometer-outline" size={18} color={COLORS.amber} />
-              </View>
-              <Text style={styles.envStatus}>{tempStatus}</Text>
-            </View>
-            <Text style={styles.envValue}>
-              {temp.toFixed(1)}
-              <Text style={styles.envUnit}>°C</Text>
-            </Text>
-            <Text style={styles.envLabel}>Nhiệt độ kho</Text>
-            <ProgressBar value={clamp01(temp / 50)} color={COLORS.amber} />
-          </View>
-
-          <View style={styles.envCard}>
-            <View style={styles.envHead}>
-              <View style={[styles.envIcon, { backgroundColor: COLORS.tealSoft }]}>
-                <Ionicons name="water-outline" size={18} color={COLORS.teal} />
-              </View>
-              <Text style={styles.envStatus}>{humStatus}</Text>
-            </View>
-            <Text style={styles.envValue}>
-              {hum.toFixed(0)}
-              <Text style={styles.envUnit}>%</Text>
-            </Text>
-            <Text style={styles.envLabel}>Độ ẩm không khí</Text>
-            <ProgressBar value={clamp01(hum / 100)} color={COLORS.teal} />
-          </View>
-        </View>
-
         {/* ---------------- Banner chip mới ---------------- */}
         {hasUnknownChip && (
           <View style={styles.detectBanner}>
             <View style={styles.detectIcon}>
-              <Ionicons name="sparkles" size={18} color={COLORS.amber} />
+              <Ionicons name="hardware-chip-outline" size={18} color={COLORS.amber} />
             </View>
             <View style={styles.detectText}>
               <Text style={styles.detectTitle}>Phát hiện chip RFID mới</Text>
@@ -605,12 +589,12 @@ function SmartStoreScreen() {
         )}
 
         {/* ---------------- Tìm kiếm (tab sản phẩm) ---------------- */}
-        {activeTab !== 'security' && (
+        {(activeTab === 'unpaid' || activeTab === 'paid') && (
           <View style={styles.searchBar}>
             <Ionicons name="search" size={18} color={COLORS.inkMuted} />
             <TextInput
               style={styles.searchInput}
-              placeholder="Tìm theo tên, danh mục hoặc UID..."
+              placeholder="Tìm kiếm sản phẩm hoặc mã thẻ UID..."
               placeholderTextColor={COLORS.inkMuted}
               value={query}
               onChangeText={setQuery}
@@ -635,8 +619,8 @@ function SmartStoreScreen() {
             />
             {visibleUnpaid.length === 0 ? (
               <EmptyState
-                icon={q ? 'search-outline' : 'sparkles-outline'}
-                title={q ? 'Không tìm thấy sản phẩm' : 'Tất cả đã thanh toán!'}
+                icon={q ? 'search-outline' : 'checkmark-circle-outline'}
+                title={q ? 'Không tìm thấy sản phẩm' : 'Tất cả đã thanh toán'}
                 desc={
                   q
                     ? `Không có món nào khớp với "${query}".`
@@ -716,36 +700,69 @@ function SmartStoreScreen() {
         {activeTab === 'security' && (
           <View>
             <SectionHeader
-              title="Cổng an ninh"
+              title="Cổng an ninh & Môi trường"
               subtitle="Dữ liệu RC522 thời gian thực qua Firebase & MQTT"
             />
+
+            {/* ---------------- Môi trường kho ---------------- */}
+            <View style={styles.envRow}>
+              <View style={styles.envCard}>
+                <View style={styles.envHead}>
+                  <View style={[styles.envIcon, { backgroundColor: COLORS.amberSoft }]}>
+                    <Ionicons name="thermometer-outline" size={18} color={COLORS.amber} />
+                  </View>
+                  <View style={[styles.pill, { backgroundColor: COLORS.amberSoft }]}>
+                    <Text style={[styles.pillText, { color: COLORS.amber, fontSize: 10 }]}>{tempStatus}</Text>
+                  </View>
+                </View>
+                <Text style={styles.envValue}>
+                  {temp.toFixed(1)}
+                  <Text style={styles.envUnit}>°C</Text>
+                </Text>
+                <Text style={styles.envLabel}>Nhiệt độ kho</Text>
+              </View>
+
+              <View style={styles.envCard}>
+                <View style={styles.envHead}>
+                  <View style={[styles.envIcon, { backgroundColor: COLORS.tealSoft }]}>
+                    <Ionicons name="water-outline" size={18} color={COLORS.teal} />
+                  </View>
+                  <View style={[styles.pill, { backgroundColor: COLORS.tealSoft }]}>
+                    <Text style={[styles.pillText, { color: COLORS.teal, fontSize: 10 }]}>{humStatus}</Text>
+                  </View>
+                </View>
+                <Text style={styles.envValue}>
+                  {hum.toFixed(0)}
+                  <Text style={styles.envUnit}>%</Text>
+                </Text>
+                <Text style={styles.envLabel}>Độ ẩm không khí</Text>
+              </View>
+            </View>
 
             {/* Trạng thái cổng */}
             {(() => {
               const s = gate.lastScannedStatus;
               const tone =
                 s === 'ALERT'
-                  ? { c: COLORS.rose, soft: COLORS.roseSoft, icon: 'warning' as IconName, label: 'Cảnh báo' }
+                  ? { c: COLORS.rose, soft: COLORS.roseSoft, icon: 'warning-outline' as IconName, label: 'CẢNH BÁO AN NINH' }
                   : s === 'PASS'
-                  ? { c: COLORS.sage, soft: COLORS.sageSoft, icon: 'shield-checkmark' as IconName, label: 'Hợp lệ' }
-                  : { c: COLORS.bronze, soft: COLORS.amberSoft, icon: 'scan' as IconName, label: 'Sẵn sàng' };
+                  ? { c: COLORS.sage, soft: COLORS.sageSoft, icon: 'shield-checkmark-outline' as IconName, label: 'HỢP LỆ' }
+                  : { c: COLORS.primary, soft: COLORS.primarySoft, icon: 'scan-outline' as IconName, label: 'SẴN SÀNG' };
               return (
                 <View style={styles.gateCard}>
-                  <View style={[styles.gateIconRing, { borderColor: tone.soft }]}>
-                    <View style={[styles.gateIcon, { backgroundColor: tone.soft }]}>
-                      <Ionicons name={tone.icon} size={24} color={tone.c} />
-                    </View>
+                  <View style={[styles.gateIcon, { backgroundColor: tone.soft }]}>
+                    <Ionicons name={tone.icon} size={24} color={tone.c} />
                   </View>
                   <View style={styles.gateInfo}>
                     <View style={[styles.pill, { backgroundColor: tone.soft, alignSelf: 'flex-start' }]}>
-                      <Text style={[styles.pillText, { color: tone.c }]}>{tone.label}</Text>
+                      <Text style={[styles.pillText, { color: tone.c, fontWeight: '700' }]}>{tone.label}</Text>
                     </View>
                     <Text style={styles.gateMsg} numberOfLines={2}>
                       {gate.lastMessage || 'Cổng an ninh sẵn sàng'}
                     </Text>
                     {Boolean(gate.lastScannedUid) && (
                       <View style={styles.gateMeta}>
-                        <Ionicons name="radio-outline" size={12} color={COLORS.inkMuted} />
+                        <Ionicons name="hardware-chip-outline" size={12} color={COLORS.inkMuted} />
                         <Text style={styles.gateUid}>{gate.lastScannedUid}</Text>
                         <View style={styles.dotSep} />
                         <Ionicons name="time-outline" size={12} color={COLORS.inkMuted} />
@@ -763,11 +780,11 @@ function SmartStoreScreen() {
             <View style={styles.mqttCard}>
               <View style={styles.mqttHead}>
                 <View style={styles.mqttHeadIcon}>
-                  <Ionicons name="git-network-outline" size={18} color={COLORS.bronze} />
+                  <Ionicons name="git-network-outline" size={18} color={COLORS.primary} />
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.mqttTitle}>Điều khiển Barrier</Text>
-                  <Text style={styles.mqttSub}>MQTT over WebSocket • ESP32</Text>
+                  <Text style={styles.mqttSub}>ESP32 Servo • Realtime MQTT</Text>
                 </View>
                 <View
                   style={[
@@ -789,15 +806,11 @@ function SmartStoreScreen() {
 
               <View style={styles.mqttBtns}>
                 <ScalePress style={[styles.mqttBtn, styles.mqttBtnOpen]} onPress={() => sendGate('OPEN')}>
-                  <View style={styles.mqttBtnIcon}>
-                    <Ionicons name="lock-open-outline" size={20} color="#FFFFFF" />
-                  </View>
+                  <Ionicons name="lock-open-outline" size={18} color="#FFFFFF" />
                   <Text style={styles.mqttBtnText}>Mở cổng</Text>
                 </ScalePress>
                 <ScalePress style={[styles.mqttBtn, styles.mqttBtnClose]} onPress={() => sendGate('CLOSE')}>
-                  <View style={styles.mqttBtnIcon}>
-                    <Ionicons name="lock-closed-outline" size={20} color={COLORS.champagne} />
-                  </View>
+                  <Ionicons name="lock-closed-outline" size={18} color="#FFFFFF" />
                   <Text style={styles.mqttBtnText}>Đóng cổng</Text>
                 </ScalePress>
               </View>
@@ -873,55 +886,174 @@ function SmartStoreScreen() {
             )}
           </View>
         )}
+
+        {/* ================= TAB 4: DOANH THU ================= */}
+        {activeTab === 'revenue' && (
+          <View>
+            <SectionHeader
+              title="Báo cáo Doanh thu"
+              subtitle="Thống kê tài chính & dòng tiền cửa hàng thời gian thực"
+            />
+
+            {/* Hero card Doanh thu */}
+            <LinearGradient
+              colors={[COLORS.mocha, COLORS.espresso]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.hero}
+            >
+              <View style={styles.heroTop}>
+                <View style={styles.heroLabelRow}>
+                  <Ionicons name="trending-up" size={14} color={COLORS.champagne} />
+                  <Text style={styles.heroLabel}>Doanh thu thực thu</Text>
+                </View>
+                <View style={styles.heroStatus}>
+                  <PulseDot color={isGateOnline ? '#7FD3A4' : '#F08A7E'} size={7} />
+                  <Text style={styles.heroStatusText}>
+                    {isGateOnline ? 'ESP32 Online' : 'ESP32 Offline'}
+                  </Text>
+                </View>
+              </View>
+
+              <Text style={styles.heroAmount} numberOfLines={1} adjustsFontSizeToFit>
+                {formatCurrency(paidTotal)}
+              </Text>
+              <Text style={styles.heroSub}>
+                {paidProducts.length} món đã thanh toán •{' '}
+                {isMqttConnected ? 'MQTT Realtime' : 'Firebase Cloud'}
+              </Text>
+
+              <View style={styles.heroDivider} />
+
+              <View style={styles.heroStats}>
+                <View style={styles.heroStat}>
+                  <Text style={styles.heroStatValue} numberOfLines={1} adjustsFontSizeToFit>
+                    {formatCurrency(unpaidTotal)}
+                  </Text>
+                  <Text style={styles.heroStatLabel}>Chờ thanh toán</Text>
+                </View>
+                <View style={styles.heroStatSep} />
+                <View style={styles.heroStat}>
+                  <Text style={styles.heroStatValue}>{products.length}</Text>
+                  <Text style={styles.heroStatLabel}>Tổng sản phẩm</Text>
+                </View>
+                <View style={styles.heroStatSep} />
+                <View style={styles.heroStat}>
+                  <Text style={[styles.heroStatValue, alertCount > 0 && { color: '#F3A497' }]}>
+                    {alertCount}
+                  </Text>
+                  <Text style={styles.heroStatLabel}>Cảnh báo</Text>
+                </View>
+              </View>
+            </LinearGradient>
+
+            {/* Tiến độ hoàn thành */}
+            <View style={styles.financeCard}>
+              <View style={styles.financeHead}>
+                <Text style={styles.financeTitle}>Tỷ lệ hoàn thành đơn</Text>
+                <Text style={styles.financePercent}>
+                  {products.length > 0 ? Math.round((paidProducts.length / products.length) * 100) : 0}%
+                </Text>
+              </View>
+              <View style={styles.financeBarBg}>
+                <View
+                  style={[
+                    styles.financeBarFill,
+                    {
+                      width: `${products.length > 0 ? Math.min(100, Math.round((paidProducts.length / products.length) * 100)) : 0}%`,
+                    },
+                  ]}
+                />
+              </View>
+              <View style={styles.financeMeta}>
+                <Text style={styles.financeMetaText}>
+                  Đã thu: <Text style={{ color: COLORS.sage, fontWeight: '700' }}>{formatCurrency(paidTotal)}</Text>
+                </Text>
+                <Text style={styles.financeMetaText}>
+                  Tổng giá trị kho: <Text style={{ color: COLORS.ink, fontWeight: '700' }}>{formatCurrency(paidTotal + unpaidTotal)}</Text>
+                </Text>
+              </View>
+            </View>
+
+            {/* Bảng kê sản phẩm đã thu tiền */}
+            <View style={styles.recentHead}>
+              <Text style={styles.sectionTitle}>Sản phẩm đã thu tiền</Text>
+              <Text style={styles.recentCount}>{paidProducts.length} món</Text>
+            </View>
+
+            {paidProducts.length === 0 ? (
+              <EmptyState
+                icon="cash-outline"
+                title="Chưa có doanh thu"
+                desc="Chuyển sang mục 'Chưa trả' và nhấn 'Thanh toán' để ghi nhận đơn hàng vào doanh thu."
+              />
+            ) : (
+              paidProducts.map((item) => (
+                <View key={item.id} style={styles.receiptRow}>
+                  <View style={styles.receiptIcon}>
+                    <Ionicons name={getCategoryIcon(item.icon || item.category || item.name)} size={18} color={COLORS.primary} />
+                  </View>
+                  <View style={styles.receiptInfo}>
+                    <Text style={styles.receiptName} numberOfLines={1}>{item.name}</Text>
+                    <Text style={styles.receiptUid}>UID: {item.tagUid}</Text>
+                  </View>
+                  <View style={styles.receiptRight}>
+                    <Text style={styles.receiptPrice}>+{formatCurrency(item.price)}</Text>
+                    <Text style={styles.receiptStatus}>Đã thu</Text>
+                  </View>
+                </View>
+              ))
+            )}
+          </View>
+        )}
       </ScrollView>
 
-      {/* ---------------- Floating bottom navigation ---------------- */}
-      <View pointerEvents="box-none" style={[styles.navWrap, { bottom: navBottom }]}>
-        <View style={styles.navBar}>
-          {TABS.map((t) => {
-            const active = activeTab === t.key;
-            return (
-              <ScalePress
-                key={t.key}
-                onPress={() => changeTab(t.key)}
-                style={[styles.navItem, active && styles.navItemActive]}
-                scaleTo={0.92}
-              >
+      {/* ---------------- Fixed bottom navigation ---------------- */}
+      <View style={[styles.bottomNav, { paddingBottom: Math.max(insets.bottom, 10) }]}>
+        {TABS.map((t) => {
+          const active = activeTab === t.key;
+          return (
+            <ScalePress
+              key={t.key}
+              onPress={() => changeTab(t.key)}
+              style={styles.tabBtn}
+              scaleTo={0.94}
+            >
+              <View style={styles.tabIconWrap}>
                 <Ionicons
                   name={active ? t.iconActive : t.icon}
-                  size={20}
-                  color={active ? COLORS.champagne : COLORS.inkSoft}
+                  size={22}
+                  color={active ? COLORS.primary : COLORS.inkMuted}
                 />
-                {active ? (
-                  <Text style={styles.navLabelActive} numberOfLines={1}>
-                    {t.label}
-                  </Text>
-                ) : t.count > 0 ? (
+                {t.count > 0 ? (
                   <View
                     style={[
-                      styles.navBadge,
+                      styles.tabBadge,
                       t.key === 'security' && { backgroundColor: COLORS.rose },
                     ]}
                   >
-                    <Text style={styles.navBadgeText}>{t.count > 99 ? '99+' : t.count}</Text>
+                    <Text style={styles.tabBadgeText}>{t.count > 99 ? '99+' : t.count}</Text>
                   </View>
                 ) : null}
-              </ScalePress>
-            );
-          })}
-        </View>
-
-        <ScalePress style={styles.fab} onPress={() => openAddModal()} scaleTo={0.9}>
-          <LinearGradient
-            colors={[COLORS.mocha, COLORS.espresso]}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.fabInner}
-          >
-            <Ionicons name="add" size={28} color={COLORS.champagne} />
-          </LinearGradient>
-        </ScalePress>
+              </View>
+              <Text style={[styles.tabLabel, active && styles.tabLabelActive]} numberOfLines={1}>
+                {t.label}
+              </Text>
+            </ScalePress>
+          );
+        })}
       </View>
+
+      {/* ---------------- Floating Action Button (+) ---------------- */}
+      {(activeTab === 'unpaid' || activeTab === 'paid') && (
+        <ScalePress
+          style={[styles.floatingFab, { bottom: Math.max(insets.bottom, 10) + 68 }]}
+          onPress={() => openAddModal()}
+          scaleTo={0.9}
+        >
+          <Ionicons name="add" size={28} color="#FFFFFF" />
+        </ScalePress>
+      )}
 
       {/* ---------------- Toast ---------------- */}
       <Toast toast={toast} top={insets.top + 8} onHide={() => setToast(null)} />
@@ -954,7 +1086,7 @@ function SmartStoreScreen() {
               {/* Preview */}
               <View style={styles.previewCard}>
                 <View style={styles.previewIcon}>
-                  <Text style={{ fontSize: 30 }}>{newIcon}</Text>
+                  <Ionicons name={getCategoryIcon(newIcon)} size={26} color={COLORS.mocha} />
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.previewName} numberOfLines={1}>
@@ -971,26 +1103,33 @@ function SmartStoreScreen() {
                 </View>
               </View>
 
-              <Text style={styles.fieldLabel}>Biểu tượng</Text>
+              <Text style={styles.fieldLabel}>Phân loại mặt hàng</Text>
               <View style={styles.iconGrid}>
-                {ICONS.map((ic) => {
-                  const selected = newIcon === ic;
+                {CATEGORY_OPTIONS.map((opt) => {
+                  const selected = newIcon === opt.key;
                   return (
                     <ScalePress
-                      key={ic}
+                      key={opt.key}
                       style={[styles.iconChoice, selected && styles.iconChoiceSelected]}
                       onPress={() => {
                         haptic.light();
-                        setNewIcon(ic);
+                        setNewIcon(opt.key);
                       }}
-                      scaleTo={0.9}
+                      scaleTo={0.93}
                     >
-                      <Text style={styles.iconChoiceText}>{ic}</Text>
-                      {selected ? (
-                        <View style={styles.iconCheck}>
-                          <Ionicons name="checkmark" size={10} color={COLORS.champagne} />
-                        </View>
-                      ) : null}
+                      <Ionicons
+                        name={opt.icon}
+                        size={18}
+                        color={selected ? COLORS.champagne : COLORS.inkSoft}
+                      />
+                      <Text
+                        style={[
+                          styles.iconChoiceLabel,
+                          selected && { color: COLORS.champagne, fontWeight: '600' },
+                        ]}
+                      >
+                        {opt.label}
+                      </Text>
                     </ScalePress>
                   );
                 })}
@@ -1077,6 +1216,119 @@ function SmartStoreScreen() {
           </View>
         </KeyboardAvoidingView>
       </Modal>
+
+      {/* ============================================================= */}
+      {/* Popup màu đỏ cảnh báo chống trộm / vi phạm an ninh             */}
+      {/* ============================================================= */}
+      <Modal
+        visible={Boolean(theftAlert?.visible)}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={() => setTheftAlert(null)}
+      >
+        <View style={styles.theftBackdrop}>
+          <View style={styles.theftCard}>
+            {/* Header màu đỏ báo động */}
+            <LinearGradient
+              colors={['#DC2626', '#991B1B']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.theftHeader}
+            >
+              <View style={styles.theftIconCircle}>
+                <Ionicons name="warning" size={34} color="#FFFFFF" />
+              </View>
+              <Text style={styles.theftTitle}>CẢNH BÁO VI PHẠM AN NINH</Text>
+              <Text style={styles.theftSubtitle}>
+                Phát hiện hàng chưa thanh toán đi qua cổng kiểm soát!
+              </Text>
+            </LinearGradient>
+
+            {/* Chi tiết sản phẩm bị trộm */}
+            <View style={styles.theftBody}>
+              <View style={styles.theftInfoBox}>
+                <View style={styles.theftInfoHead}>
+                  <Text style={styles.theftProdName} numberOfLines={2}>
+                    {theftAlert?.productName || 'Mặt hàng chưa xác định'}
+                  </Text>
+                  {typeof theftAlert?.price === 'number' && theftAlert.price > 0 && (
+                    <Text style={styles.theftProdPrice}>
+                      {formatCurrency(theftAlert.price)}
+                    </Text>
+                  )}
+                </View>
+
+                <View style={styles.theftMetaRow}>
+                  <View style={styles.theftMetaItem}>
+                    <Ionicons name="radio-outline" size={14} color={COLORS.rose} />
+                    <Text style={styles.theftMetaText}>UID: {theftAlert?.tagUid || 'N/A'}</Text>
+                  </View>
+                  <View style={styles.theftMetaItem}>
+                    <Ionicons name="time-outline" size={14} color={COLORS.inkMuted} />
+                    <Text style={styles.theftMetaText}>{theftAlert?.time || 'Vừa xong'}</Text>
+                  </View>
+                </View>
+
+                <View style={styles.theftStatusBadge}>
+                  <View style={styles.theftStatusDot} />
+                  <Text style={styles.theftStatusBadgeText}>CHƯA THANH TOÁN (UNPAID)</Text>
+                </View>
+              </View>
+
+              {/* Tình trạng các cơ chế bảo vệ */}
+              <View style={styles.theftSecurityBox}>
+                <View style={styles.theftSecurityRow}>
+                  <Ionicons name="volume-high" size={16} color={COLORS.rose} />
+                  <Text style={styles.theftSecurityText}>
+                    Còi Buzzer tại cổng: <Text style={styles.theftSecurityAlert}>ĐANG BÁO ĐỘNG</Text>
+                  </Text>
+                </View>
+                <View style={styles.theftSecurityRow}>
+                  <Ionicons name="lock-closed" size={16} color={COLORS.rose} />
+                  <Text style={styles.theftSecurityText}>
+                    Cổng Barrier: <Text style={styles.theftSecurityAlert}>TỰ ĐỘNG KHÓA CHẶT</Text>
+                  </Text>
+                </View>
+                <View style={styles.theftSecurityRow}>
+                  <Ionicons name="shield-checkmark" size={16} color={COLORS.inkSoft} />
+                  <Text style={styles.theftSecurityText}>
+                    Nhật ký an ninh: <Text style={styles.theftSecurityStrong}>ĐÃ GHI LẠI VÀO HỆ THỐNG</Text>
+                  </Text>
+                </View>
+              </View>
+
+              {/* Các nút bấm thao tác */}
+              <View style={styles.theftActionCol}>
+                <ScalePress
+                  style={styles.theftPayBtnWrap}
+                  onPress={handleTheftPayNow}
+                >
+                  <LinearGradient
+                    colors={['#DC2626', '#B91C1C']}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={styles.theftPayBtn}
+                  >
+                    <Ionicons name="card-outline" size={18} color="#FFFFFF" />
+                    <Text style={styles.theftPayBtnText}>Thanh toán ngay món này</Text>
+                  </LinearGradient>
+                </ScalePress>
+
+                <ScalePress
+                  style={styles.theftDismissBtn}
+                  onPress={() => {
+                    haptic.light();
+                    setTheftAlert(null);
+                  }}
+                >
+                  <Text style={styles.theftDismissBtnText}>Đã kiểm tra / Tắt cảnh báo</Text>
+                </ScalePress>
+              </View>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -1149,7 +1401,11 @@ function ProductCard({
       {/* Hàng trên */}
       <View style={styles.cardTop}>
         <View style={styles.cardIcon}>
-          <Text style={styles.cardEmoji}>{item.icon}</Text>
+          <Ionicons
+            name={getCategoryIcon(item.icon || item.category || item.name)}
+            size={22}
+            color={COLORS.mocha}
+          />
         </View>
         <View style={styles.cardInfo}>
           <Text style={styles.cardName} numberOfLines={1}>
@@ -1231,23 +1487,23 @@ function ProductCard({
         {isPaid ? (
           <>
             <ScalePress style={[styles.actionBtn, styles.actionAmber]} onPress={onPrimary}>
-              <Ionicons name="arrow-undo-outline" size={16} color={COLORS.amber} />
-              <Text style={[styles.actionText, { color: COLORS.amber }]}>Đặt lại chưa trả</Text>
+              <Ionicons name="arrow-undo-outline" size={15} color={COLORS.inkSoft} />
+              <Text style={[styles.actionText, { color: COLORS.inkSoft }]} numberOfLines={1}>Hủy thanh toán</Text>
             </ScalePress>
             <ScalePress style={[styles.actionBtn, styles.actionSage]} onPress={onSecondary}>
-              <Ionicons name="walk-outline" size={16} color={COLORS.sage} />
-              <Text style={[styles.actionText, { color: COLORS.sage }]}>Thử qua cổng</Text>
+              <Ionicons name="scan-outline" size={15} color={COLORS.sage} />
+              <Text style={[styles.actionText, { color: COLORS.sage }]} numberOfLines={1}>Test qua cổng</Text>
             </ScalePress>
           </>
         ) : (
           <>
             <ScalePress style={[styles.actionBtn, styles.actionPrimary]} onPress={onPrimary}>
-              <Ionicons name="card-outline" size={16} color={COLORS.champagne} />
-              <Text style={[styles.actionText, { color: '#FFFFFF' }]}>Thanh toán</Text>
+              <Ionicons name="card-outline" size={15} color="#FFFFFF" />
+              <Text style={[styles.actionText, { color: '#FFFFFF' }]} numberOfLines={1}>Thanh toán</Text>
             </ScalePress>
             <ScalePress style={[styles.actionBtn, styles.actionRose]} onPress={onSecondary}>
-              <Ionicons name="alert-circle-outline" size={16} color={COLORS.rose} />
-              <Text style={[styles.actionText, { color: COLORS.rose }]}>Thử trộm</Text>
+              <Ionicons name="warning-outline" size={15} color={COLORS.rose} />
+              <Text style={[styles.actionText, { color: COLORS.rose }]} numberOfLines={1}>Test vi phạm</Text>
             </ScalePress>
           </>
         )}
@@ -1286,10 +1542,10 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   brand: {
-    fontSize: 28,
-    fontWeight: '800',
+    fontSize: 26,
+    fontWeight: '700',
     color: COLORS.ink,
-    letterSpacing: -0.6,
+    letterSpacing: -0.2,
     marginTop: 2,
   },
   dateRow: {
@@ -1326,26 +1582,10 @@ const styles = StyleSheet.create({
   hero: {
     borderRadius: RADIUS.xl,
     padding: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(226, 200, 147, 0.22)',
     overflow: 'hidden',
     ...shadow(3),
-  },
-  heroOrbA: {
-    position: 'absolute',
-    width: 220,
-    height: 220,
-    borderRadius: 110,
-    backgroundColor: COLORS.champagneSoft,
-    top: -110,
-    right: -60,
-  },
-  heroOrbB: {
-    position: 'absolute',
-    width: 140,
-    height: 140,
-    borderRadius: 70,
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    bottom: -60,
-    left: -30,
   },
   heroTop: {
     flexDirection: 'row',
@@ -1515,7 +1755,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.espresso,
     paddingHorizontal: 13,
     paddingVertical: 9,
-    borderRadius: RADIUS.pill,
+    borderRadius: RADIUS.sm,
   },
   detectBtnText: {
     color: '#FFFFFF',
@@ -1529,7 +1769,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 10,
     backgroundColor: COLORS.surface,
-    borderRadius: RADIUS.pill,
+    borderRadius: RADIUS.md,
     borderWidth: 1,
     borderColor: COLORS.line,
     paddingHorizontal: 16,
@@ -1609,16 +1849,15 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
   },
   cardIcon: {
-    width: 64,
-    height: 64,
-    borderRadius: 20,
-    backgroundColor: COLORS.sand,
+    width: 48,
+    height: 48,
+    borderRadius: RADIUS.md,
+    backgroundColor: COLORS.surfaceWarm,
+    borderWidth: 1,
+    borderColor: COLORS.line,
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 12,
-  },
-  cardEmoji: {
-    fontSize: 32,
   },
   cardInfo: {
     flex: 1,
@@ -1746,40 +1985,42 @@ const styles = StyleSheet.create({
   /* Card actions */
   cardActions: {
     flexDirection: 'row',
-    gap: 10,
+    gap: 8,
     marginTop: 12,
   },
   actionBtn: {
-    flex: 1,
-    height: 46,
+    height: 42,
     borderRadius: RADIUS.md,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 7,
+    paddingHorizontal: 8,
+    gap: 6,
   },
   actionPrimary: {
     flex: 1.3,
-    backgroundColor: COLORS.espresso,
+    backgroundColor: COLORS.primary,
   },
   actionRose: {
+    flex: 1,
     backgroundColor: COLORS.roseSoft,
     borderWidth: 1,
     borderColor: COLORS.roseLine,
   },
   actionAmber: {
     flex: 1.3,
-    backgroundColor: COLORS.amberSoft,
+    backgroundColor: COLORS.surfaceWarm,
     borderWidth: 1,
-    borderColor: COLORS.amberLine,
+    borderColor: COLORS.line,
   },
   actionSage: {
+    flex: 1,
     backgroundColor: COLORS.sageSoft,
     borderWidth: 1,
     borderColor: COLORS.sageLine,
   },
   actionText: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '700',
   },
 
@@ -1788,27 +2029,19 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: COLORS.surface,
-    borderRadius: RADIUS.xl,
-    padding: 16,
+    borderRadius: RADIUS.lg,
+    padding: 14,
     borderWidth: 1,
     borderColor: COLORS.line,
-    ...shadow(2),
-  },
-  gateIconRing: {
-    width: 68,
-    height: 68,
-    borderRadius: 34,
-    borderWidth: 6,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 14,
+    ...shadow(1),
   },
   gateIcon: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
+    width: 44,
+    height: 44,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
+    marginRight: 12,
   },
   gateInfo: {
     flex: 1,
@@ -1841,12 +2074,12 @@ const styles = StyleSheet.create({
   /* MQTT */
   mqttCard: {
     backgroundColor: COLORS.surface,
-    borderRadius: RADIUS.xl,
+    borderRadius: RADIUS.lg,
     padding: 16,
     marginTop: 14,
     borderWidth: 1,
     borderColor: COLORS.line,
-    ...shadow(2),
+    ...shadow(1),
   },
   mqttHead: {
     flexDirection: 'row',
@@ -1855,22 +2088,22 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   mqttHeadIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 14,
-    backgroundColor: COLORS.amberSoft,
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: COLORS.primarySoft,
     alignItems: 'center',
     justifyContent: 'center',
   },
   mqttTitle: {
     fontSize: 15,
-    fontWeight: '800',
+    fontWeight: '700',
     color: COLORS.ink,
   },
   mqttSub: {
     fontSize: 11,
     color: COLORS.inkMuted,
-    marginTop: 2,
+    marginTop: 1,
   },
   mqttBtns: {
     flexDirection: 'row',
@@ -1878,8 +2111,9 @@ const styles = StyleSheet.create({
   },
   mqttBtn: {
     flex: 1,
-    borderRadius: RADIUS.lg,
-    paddingVertical: 16,
+    borderRadius: RADIUS.md,
+    paddingVertical: 13,
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
@@ -1888,15 +2122,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.sage,
   },
   mqttBtnClose: {
-    backgroundColor: COLORS.espresso,
-  },
-  mqttBtnIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255,255,255,0.14)',
-    alignItems: 'center',
-    justifyContent: 'center',
+    backgroundColor: COLORS.mocha,
   },
   mqttBtnText: {
     color: '#FFFFFF',
@@ -2007,77 +2233,68 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
 
-  /* Bottom nav */
-  navWrap: {
+  /* Bottom nav cố định chuẩn mực */
+  bottomNav: {
     position: 'absolute',
-    left: 16,
-    right: 16,
+    left: 0,
+    right: 0,
+    bottom: 0,
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
+    backgroundColor: '#FFFFFF',
+    borderTopWidth: 1,
+    borderTopColor: COLORS.line,
+    paddingTop: 8,
+    ...shadow(2),
   },
-  navBar: {
+  tabBtn: {
     flex: 1,
-    height: NAV_HEIGHT,
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.97)',
-    borderRadius: NAV_HEIGHT / 2,
-    paddingHorizontal: 7,
-    borderWidth: 1,
-    borderColor: COLORS.line,
-    ...shadow(3),
-  },
-  navItem: {
-    flex: 1,
-    height: 50,
-    borderRadius: 25,
-    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
+    paddingVertical: 4,
+    gap: 3,
   },
-  navItemActive: {
-    flex: 1.9,
-    backgroundColor: COLORS.espresso,
+  tabIconWrap: {
+    width: 28,
+    height: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  navLabelActive: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  navBadge: {
+  tabBadge: {
     position: 'absolute',
-    top: 7,
-    right: '22%',
-    minWidth: 17,
-    height: 17,
-    borderRadius: 9,
+    top: -3,
+    right: -8,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
     paddingHorizontal: 4,
-    backgroundColor: COLORS.bronze,
+    backgroundColor: COLORS.primary,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: COLORS.surface,
   },
-  navBadgeText: {
+  tabBadgeText: {
     color: '#FFFFFF',
     fontSize: 9,
     fontWeight: '800',
   },
-  fab: {
-    width: NAV_HEIGHT,
-    height: NAV_HEIGHT,
-    borderRadius: NAV_HEIGHT / 2,
-    ...shadow(3),
+  tabLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.inkMuted,
   },
-  fabInner: {
-    flex: 1,
-    borderRadius: NAV_HEIGHT / 2,
+  tabLabelActive: {
+    color: COLORS.primary,
+    fontWeight: '700',
+  },
+  floatingFab: {
+    position: 'absolute',
+    right: 18,
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: COLORS.primary,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(226,200,147,0.25)',
+    ...shadow(3),
   },
 
   /* Bottom sheet */
@@ -2246,31 +2463,23 @@ const styles = StyleSheet.create({
   },
   iconChoice: {
     width: '22.6%',
-    aspectRatio: 1,
+    paddingVertical: 10,
     borderRadius: RADIUS.md,
     backgroundColor: COLORS.surface,
     borderWidth: 1.5,
     borderColor: COLORS.line,
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 4,
   },
   iconChoiceSelected: {
     borderColor: COLORS.espresso,
-    backgroundColor: COLORS.sand,
-  },
-  iconChoiceText: {
-    fontSize: 26,
-  },
-  iconCheck: {
-    position: 'absolute',
-    top: 5,
-    right: 5,
-    width: 16,
-    height: 16,
-    borderRadius: 8,
     backgroundColor: COLORS.espresso,
-    alignItems: 'center',
-    justifyContent: 'center',
+  },
+  iconChoiceLabel: {
+    fontSize: 11,
+    color: COLORS.inkSoft,
+    fontWeight: '500',
   },
   sheetBtns: {
     flexDirection: 'row',
@@ -2311,5 +2520,292 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '700',
     color: '#FFFFFF',
+  },
+
+  /* Doanh thu styles */
+  financeCard: {
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.lg,
+    padding: 16,
+    marginTop: 14,
+    borderWidth: 1,
+    borderColor: COLORS.line,
+    ...shadow(1),
+  },
+  financeHead: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  financeTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: COLORS.ink,
+  },
+  financePercent: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: COLORS.primary,
+  },
+  financeBarBg: {
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: COLORS.sand,
+    overflow: 'hidden',
+  },
+  financeBarFill: {
+    height: '100%',
+    borderRadius: 4,
+    backgroundColor: COLORS.primary,
+  },
+  financeMeta: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 10,
+  },
+  financeMetaText: {
+    fontSize: 12,
+    color: COLORS.inkSoft,
+  },
+  recentHead: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 22,
+    marginBottom: 10,
+  },
+  recentCount: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.inkMuted,
+  },
+  receiptRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.md,
+    padding: 12,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: COLORS.line,
+  },
+  receiptIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+    backgroundColor: COLORS.primarySoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+  },
+  receiptInfo: {
+    flex: 1,
+  },
+  receiptName: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: COLORS.ink,
+  },
+  receiptUid: {
+    fontSize: 11,
+    fontFamily: MONO,
+    color: COLORS.inkMuted,
+    marginTop: 2,
+  },
+  receiptRight: {
+    alignItems: 'flex-end',
+  },
+  receiptPrice: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: COLORS.sage,
+  },
+  receiptStatus: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.inkMuted,
+    marginTop: 2,
+  },
+
+  /* ============================================================= */
+  /* Theft Alert Popup Styles                                      */
+  /* ============================================================= */
+  theftBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.75)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  theftCard: {
+    width: '100%',
+    maxWidth: 380,
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.xl,
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: '#EF4444',
+    ...shadow(3),
+  },
+  theftHeader: {
+    alignItems: 'center',
+    paddingVertical: 22,
+    paddingHorizontal: 16,
+  },
+  theftIconCircle: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 10,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255, 255, 255, 0.4)',
+  },
+  theftTitle: {
+    fontSize: 17,
+    fontWeight: '900',
+    color: '#FFFFFF',
+    letterSpacing: 0.5,
+    textAlign: 'center',
+  },
+  theftSubtitle: {
+    fontSize: 13,
+    color: 'rgba(255, 255, 255, 0.9)',
+    textAlign: 'center',
+    marginTop: 4,
+    fontWeight: '500',
+  },
+  theftBody: {
+    padding: 18,
+    gap: 14,
+  },
+  theftInfoBox: {
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1.5,
+    borderColor: '#FECACA',
+    borderRadius: RADIUS.lg,
+    padding: 14,
+    gap: 8,
+  },
+  theftInfoHead: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: 10,
+  },
+  theftProdName: {
+    flex: 1,
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#991B1B',
+  },
+  theftProdPrice: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#1E293B',
+  },
+  theftMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    flexWrap: 'wrap',
+  },
+  theftMetaItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  theftMetaText: {
+    fontSize: 12,
+    fontFamily: MONO,
+    color: COLORS.inkSoft,
+    fontWeight: '600',
+  },
+  theftStatusBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    backgroundColor: '#FEE2E2',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: RADIUS.pill,
+    gap: 6,
+    marginTop: 2,
+  },
+  theftStatusDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#EF4444',
+  },
+  theftStatusBadgeText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#DC2626',
+    letterSpacing: 0.3,
+  },
+  theftSecurityBox: {
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: RADIUS.md,
+    padding: 12,
+    gap: 8,
+  },
+  theftSecurityRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  theftSecurityText: {
+    fontSize: 12,
+    color: COLORS.inkSoft,
+    flex: 1,
+  },
+  theftSecurityAlert: {
+    fontWeight: '700',
+    color: COLORS.rose,
+  },
+  theftSecurityStrong: {
+    fontWeight: '700',
+    color: COLORS.ink,
+  },
+  theftActionCol: {
+    gap: 10,
+    marginTop: 4,
+  },
+  theftPayBtnWrap: {
+    borderRadius: RADIUS.md,
+    overflow: 'hidden',
+    ...shadow(2),
+  },
+  theftPayBtn: {
+    height: 48,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  theftPayBtnText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  theftDismissBtn: {
+    height: 44,
+    borderRadius: RADIUS.md,
+    backgroundColor: COLORS.surfaceWarm,
+    borderWidth: 1,
+    borderColor: COLORS.line,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  theftDismissBtnText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.inkSoft,
   },
 });

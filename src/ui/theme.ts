@@ -1,51 +1,53 @@
 import { Platform, ViewStyle } from 'react-native';
 
 /**
- * Bảng màu "Be Trắng cao cấp" – Ivory, Sand, Espresso & Champagne
+ * Bảng màu "Clean Modern Retail & IoT" – Slate, Clean White, Emerald & Cobalt
  */
 export const COLORS = {
-  // Nền & bề mặt
-  bg: '#F7F3EC',
-  surface: '#FFFFFF',
-  surfaceWarm: '#FBF8F3',
-  sand: '#F2EBDF',
-  sandDeep: '#E7DDCC',
-  line: '#ECE4D6',
-  lineStrong: '#DCCFBB',
+  // Nền & bề mặt sạch sẽ, hiện đại
+  bg: '#F8FAFC',          // Slate 50 siêu sáng sạch
+  surface: '#FFFFFF',     // Trắng tinh khiết
+  surfaceWarm: '#F1F5F9', // Slate 100
+  sand: '#F1F5F9',        // Slate 100 (thay cho be xỉn)
+  sandDeep: '#E2E8F0',    // Slate 200
+  line: '#E2E8F0',        // Đường viền hairline sắc nét
+  lineStrong: '#CBD5E1',  // Slate 300
 
-  // Chữ
-  ink: '#1F1A16',
-  inkSoft: '#5E554C',
-  inkMuted: '#A0958A',
+  // Chữ phân cấp tương phản cao
+  ink: '#0F172A',         // Slate 900
+  inkSoft: '#475569',     // Slate 600
+  inkMuted: '#94A3B8',    // Slate 400
 
-  // Nhấn chính
-  espresso: '#2A221C',
-  mocha: '#4E3E31',
-  champagne: '#E2C893',
-  champagneSoft: 'rgba(226, 200, 147, 0.16)',
-  bronze: '#9C7444',
+  // Điểm nhấn công nghệ
+  primary: '#2563EB',     // Cobalt Blue 600
+  primarySoft: '#EFF6FF', // Blue 50
+  espresso: '#0F172A',    // Slate 900 (giữ tương thích)
+  mocha: '#1E293B',       // Slate 800
+  champagne: '#2563EB',   // Cobalt Blue (thay thế ánh vàng xỉn)
+  champagneSoft: '#DBEAFE',
+  bronze: '#334155',      // Slate 700
 
-  // Trạng thái
-  sage: '#3F7A5C',
-  sageSoft: '#E8F2EC',
-  sageLine: '#CFE3D7',
-  rose: '#C2554A',
-  roseSoft: '#FBEDEA',
-  roseLine: '#F1D3CD',
-  amber: '#A8732F',
-  amberSoft: '#FAF0E1',
-  amberLine: '#EBD6B5',
-  teal: '#4F7F86',
-  tealSoft: '#E7F0F1',
+  // Màu trạng thái chuẩn quốc tế
+  sage: '#10B981',        // Emerald 500 - Hợp lệ / Đã thanh toán
+  sageSoft: '#ECFDF5',    // Emerald 50
+  sageLine: '#A7F3D0',    // Emerald 200
+  rose: '#EF4444',        // Red 500 - Cảnh báo trộm / Chưa trả
+  roseSoft: '#FEF2F2',    // Red 50
+  roseLine: '#FECACA',    // Red 200
+  amber: '#F59E0B',       // Amber 500 - Nhiệt độ / Cảnh báo phụ
+  amberSoft: '#FFFBEB',   // Amber 50
+  amberLine: '#FDE68A',   // Amber 200
+  teal: '#0EA5E9',        // Sky 500 - Độ ẩm
+  tealSoft: '#F0F9FF',    // Sky 50
 
-  shadow: '#5A4632',
+  shadow: '#0F172A',      // Bóng đổ trung tính mềm mại
 };
 
 export const RADIUS = {
-  sm: 10,
-  md: 14,
-  lg: 20,
-  xl: 26,
+  sm: 8,
+  md: 12,
+  lg: 16,
+  xl: 20,
   pill: 999,
 };
 
@@ -53,9 +55,9 @@ export const MONO = Platform.select({ ios: 'Menlo', default: 'monospace' });
 
 export const shadow = (level: 1 | 2 | 3): ViewStyle => {
   const map = {
-    1: { h: 2, r: 6, o: 0.05, e: 1 },
-    2: { h: 6, r: 16, o: 0.08, e: 3 },
-    3: { h: 12, r: 24, o: 0.16, e: 10 },
+    1: { h: 1, r: 4, o: 0.04, e: 1 },
+    2: { h: 4, r: 12, o: 0.06, e: 3 },
+    3: { h: 8, r: 20, o: 0.08, e: 6 },
   } as const;
   const s = map[level];
   return {

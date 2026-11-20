@@ -13,8 +13,9 @@ export interface MqttRfidData {
   time?: string;
 }
 
-const BROKER_HOST = '10.95.112.35';
-const BROKER_PORT = 8000; // Cổng WebSocket của HiveMQ
+const RTDB_URL = 'https://cuahangthongminhesp32-default-rtdb.asia-southeast1.firebasedatabase.app';
+let CURRENT_BROKER_HOST = '10.153.89.35';
+const BROKER_PORT = 8000; // Cổng WebSocket của Broker (Aedes)
 const WS_PATH = '/mqtt';
 
 const TOPIC_DHT = 'cua_hang_IOT/sensor/dht';
@@ -31,7 +32,25 @@ class MqttService {
   private onGateCallback?: (status: string) => void;
   private onConnectionChange?: (connected: boolean) => void;
 
-  init({
+  // Tự động lấy IP Broker máy tính từ Firebase (do broker.js publish lên)
+  async fetchBrokerHost(): Promise<string> {
+    try {
+      const res = await fetch(`${RTDB_URL}/serverConfig.json`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.brokerHost) {
+          CURRENT_BROKER_HOST = data.brokerHost;
+          console.log('[MQTT] Tự động lấy IP Broker từ Firebase:', CURRENT_BROKER_HOST);
+          return CURRENT_BROKER_HOST;
+        }
+      }
+    } catch (e) {
+      console.warn('[MQTT] Không lấy được IP từ Firebase, dùng mặc định:', CURRENT_BROKER_HOST);
+    }
+    return CURRENT_BROKER_HOST;
+  }
+
+  async init({
     onDht,
     onRfid,
     onGate,
@@ -47,8 +66,21 @@ class MqttService {
     this.onGateCallback = onGate;
     this.onConnectionChange = onConnectionChange;
 
+    await this.fetchBrokerHost();
+    this.setupClient(CURRENT_BROKER_HOST);
+  }
+
+  private setupClient(host: string) {
+    if (this.client) {
+      try {
+        if (this.client.isConnected()) {
+          this.client.disconnect();
+        }
+      } catch (_) {}
+    }
+
     const clientId = 'SmartStore_App_' + Math.random().toString(16).substring(2, 8);
-    this.client = new Paho.Client(BROKER_HOST, BROKER_PORT, WS_PATH, clientId);
+    this.client = new Paho.Client(host, BROKER_PORT, WS_PATH, clientId);
 
     this.client.onConnectionLost = (responseObject) => {
       console.log('[MQTT] Mất kết nối:', responseObject.errorMessage);
@@ -97,6 +129,8 @@ class MqttService {
       timeout: 5,
       keepAliveInterval: 30,
       cleanSession: true,
+      userName: 'admin',
+      password: 'admin123',
       onSuccess: () => {
         console.log('[MQTT] Kết nối HiveMQ WebSocket thành công!');
         this.isConnected = true;
@@ -110,8 +144,15 @@ class MqttService {
         console.log('[MQTT] Kết nối thất bại:', err.errorMessage);
         this.isConnected = false;
         this.onConnectionChange?.(false);
-        // Thử lại sau 5s
-        setTimeout(() => this.connect(), 5000);
+        // Thử refresh lại IP từ Firebase sau 5s
+        setTimeout(async () => {
+          const newHost = await this.fetchBrokerHost();
+          if (newHost !== CURRENT_BROKER_HOST || !this.client) {
+            this.setupClient(newHost);
+          } else {
+            this.connect();
+          }
+        }, 5000);
       },
     });
   }
